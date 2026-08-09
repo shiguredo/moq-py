@@ -1,0 +1,76 @@
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "check-merge-conflict" },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending" },
+  { id = "trailing-whitespace" },
+]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt"
+language = "system"
+entry = "cargo fmt -- --check"
+files = "\\.rs$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy --all-targets --all-features -- -D warnings"
+files = "\\.rs$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+language = "system"
+entry = "uv run ruff format --check ."
+files = "\\.py$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+language = "system"
+entry = "uv run ruff check ."
+files = "\\.py$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "ty-check"
+name = "ty check"
+language = "system"
+entry = "uv run ty check"
+files = "\\.py(i)?$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "tombi-format"
+name = "tombi format"
+language = "system"
+entry = "tombi format --check"
+files = "\\.toml$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "tombi-lint"
+name = "tombi lint"
+language = "system"
+entry = "tombi lint"
+files = "\\.toml$"
+pass_filenames = false
+
+[[repos.hooks]]
+id = "pytest"
+name = "pytest"
+language = "system"
+entry = "uv run pytest"
+files = "^(python|src|tests)/"
+pass_filenames = false
+stages = ["pre-push"]

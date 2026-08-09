@@ -1,0 +1,76 @@
+[build-system]
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "moqt-py"
+version = "0.1.0"
+description = "Python bindings and WebTransport adapter for Media over QUIC Transport"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Shiguredo Inc.", email = "contact+pypi@shiguredo.jp" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Free Threading :: 2 - Beta",
+  "Programming Language :: Rust",
+]
+dependencies = [
+  # WebTransport over HTTP/3 の asyncio I/O
+  "webtransport-py>=2026.1.0.dev6,<2026.2",
+]
+
+[dependency-groups]
+dev = [
+  # Rust extension の開発ビルドと型スタブ生成
+  "maturin>=1.14.1,<2.0",
+  # テスト実行と非同期テスト
+  "pytest",
+  "pytest-asyncio",
+  "pytest-timeout",
+  # SETUP の任意分割を検証する Property-Based Testing
+  "hypothesis",
+  # 実通信テスト用の自己署名証明書生成
+  "cryptography",
+  # Python の format / lint / 型検査
+  "ruff",
+  "ty",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "moqt._native"
+manifest-path = "Cargo.toml"
+
+[tool.uv]
+python-preference = "only-managed"
+
+[tool.uv.sources]
+webtransport-py = { path = "../../shiguredo-oss/webtransport-py", package = true }
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+extend-exclude = ["python/moqt/_native.pyi"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "PT", "ANN", "RUF"]
+ignore = []
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--timeout=10"]
+testpaths = ["tests"]
+python_files = ["test_*.py", "prop_*.py"]
+python_functions = ["test_*", "prop_*"]
+asyncio_mode = "strict"
+
+[tool.ty]
+
+[tool.tombi]
+[tool.tombi.schema]
+enabled = false
+
+[tool.tombi.files]
+exclude = ["uv.lock", "target/**", "dist/**", ".venv/**"]

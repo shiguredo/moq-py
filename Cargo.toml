@@ -1,0 +1,23 @@
+[package]
+name = "moqt-py"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Python bindings for Media over QUIC Transport"
+readme = "README.md"
+repository = "https://github.com/shiguredo/moqt-py"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Python バインディングと型スタブ生成用の introspection
+pyo3 = { version = "0.29", features = [
+  "extension-module",
+  "experimental-inspect"
+] }
+# MoQT の Sans I/O codec と Session 状態機械
+shiguredo_moqt = { path = "../../shiguredo-rust/moqt-rs" }
