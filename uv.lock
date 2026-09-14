@@ -210,7 +210,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "webtransport-py", directory = "../../shiguredo-oss/webtransport-py" }]
+requires-dist = [{ name = "webtransport-py", directory = "../webtransport-py" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -361,34 +361,29 @@ wheels = [
 
 [[package]]
 name = "webtransport-py"
-source = { directory = "../../shiguredo-oss/webtransport-py" }
+source = { directory = "../webtransport-py" }
 
 [package.metadata]
 
 [package.metadata.requires-dev]
 build = [
-    { name = "nanobind", specifier = ">=2.13.0" },
+    { name = "nanobind", specifier = "~=3.0.0" },
     { name = "scikit-build-core", specifier = ">=1.0.3" },
 ]
 dev = [
     { name = "cryptography" },
     { name = "hypothesis" },
-    { name = "nanobind", specifier = ">=2.13.0" },
+    { name = "nanobind", specifier = "~=3.0.0" },
     { name = "playwright", specifier = "~=1.62.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "pytest-playwright", specifier = "~=0.8.0" },
+    { name = "pytest-playwright", specifier = "~=0.9.0" },
     { name = "pytest-timeout" },
-    { name = "ruff" },
+    { name = "ruff", specifier = "==0.16.6" },
     { name = "scikit-build-core", specifier = ">=1.0.3" },
     { name = "structlog" },
-    { name = "ty" },
 ]
 example = [{ name = "structlog" }]
-lint = [
-    { name = "ruff" },
-    { name = "ty" },
-]
 test = [
     { name = "cryptography" },
     { name = "hypothesis" },

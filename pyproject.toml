@@ -48,7 +48,7 @@ manifest-path = "Cargo.toml"
 python-preference = "only-managed"
 
 [tool.uv.sources]
-webtransport-py = { path = "../../shiguredo-oss/webtransport-py", package = true }
+webtransport-py = { path = "../../shiguredo/webtransport-py", package = true }
 
 [tool.ruff]
 target-version = "py314"
