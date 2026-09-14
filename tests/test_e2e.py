@@ -152,7 +152,7 @@ async def test_subscribe_and_receive_objects_over_datagram(
 
 
 # client から FETCH を送る経路は、応答後にライブラリがセッションを閉じる
-# 不具合が残っている。原因を特定してから有効化する。
+# 不具合が残っている (issues/0001-bug-fetch-response-closes-session.md)。
 @pytest.mark.xfail(reason="FETCH の応答処理が未完成である", strict=False)
 @pytest.mark.asyncio
 async def test_fetch_receives_objects(

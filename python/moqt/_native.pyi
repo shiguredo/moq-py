@@ -133,6 +133,13 @@ class _CoreSession:
         """
         終了済みの subscription を破棄する。
         """
+    @property
+    def last_error(self, /) -> str |None:
+        """
+        状態機械が通知した直近のエラー理由を返す。
+
+        プロトコル違反の切り分けに使う診断用の値である。
+        """
     def next_local_request_id(self, /) -> int:
         """
         次の request 用 Request ID を予約する。

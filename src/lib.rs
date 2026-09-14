@@ -956,6 +956,11 @@ pub(crate) struct CoreSession {
     /// 受信中のデータストリームの Track Alias と Group ID
     /// (subgroup ヘッダで確定する)。
     data_track_aliases: HashMap<u64, (u64, u64)>,
+    /// 状態機械が通知した直近のエラー理由 (診断用)。
+    ///
+    /// ライブラリがプロトコル違反を検出するとセッションを閉じるイベントを
+    /// 発行する。その理由を Python 側から参照できるように保持する。
+    last_error: Option<String>,
     /// stream type の varint を消費済みのデータストリーム。
     ///
     /// MoQT の単方向ストリームは先頭に stream type を持つ
@@ -1004,6 +1009,7 @@ impl CoreSession {
             data_buffers: StreamBuffers::default(),
             data_decoders: HashMap::new(),
             data_track_aliases: HashMap::new(),
+            last_error: None,
             data_stream_types_received: HashSet::new(),
             data_headers_decoded: HashSet::new(),
             started: false,
@@ -1011,6 +1017,7 @@ impl CoreSession {
         })
     }
 
+    /// データストリームの種別を状態機械へ通知し、デコーダを用意する。
     /// データストリームの種別を状態機械へ通知し、デコーダを用意する。
     fn ensure_data_decoder(
         &mut self,
@@ -1103,6 +1110,7 @@ impl CoreSession {
             }
             SessionEvent::CloseSession(error) => {
                 self.established = false;
+                self.last_error = Some(format!("{:#x} {}", error.code, error.reason));
                 Ok(CoreEvent::close(error.code, error.reason))
             }
             SessionEvent::RequestOkReceived {
@@ -1803,6 +1811,14 @@ impl CoreSession {
             }
         }
         Ok(events)
+    }
+
+    /// 状態機械が通知した直近のエラー理由を返す。
+    ///
+    /// プロトコル違反の切り分けに使う診断用の値である。
+    #[getter]
+    fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 
     /// SETUP 交換が完了しているかを返す。

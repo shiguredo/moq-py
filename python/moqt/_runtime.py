@@ -583,8 +583,7 @@ class Runtime:
             raise MoqtError("request message did not produce a send_request event")
         try:
             return request_id, await pending.future
-        except SessionClosedError as error:
-            logger.error("MoQT request %s failed: %s", request_id, error)
+        except SessionClosedError:
             self._pending_requests.pop(request_id, None)
             raise
         except BaseException:
@@ -1024,7 +1023,7 @@ class Runtime:
 
     async def _handle_close(self, event: NativeEvent) -> None:
         """セッション終了を処理する。"""
-        logger.error("MoQT close code=%s reason=%s", event.code, event.reason)
+        logger.debug("MoQT session closed: code=%s reason=%s", event.code, event.reason)
         self._closed = True
         code = int(event.code or 0)
         reason = str(event.reason or "")
