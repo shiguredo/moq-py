@@ -1,17 +1,122 @@
-"""WebTransport over HTTP/3 を利用する最小 MoQT client。"""
+"""WebTransport over HTTP/3 を利用する MoQT client。"""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+from dataclasses import dataclass, field
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 from webtransport import h3
 
-from moqt._native import _CoreEvent, _CoreSession
+from moqt._runtime import (
+    TICK_INTERVAL,
+    MessageBody,
+    MoqtError,
+    NativeEvent,
+    Runtime,
+    RuntimeEvents,
+    TransportOps,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class MoqtObject:
+    """受信した MoQT オブジェクト。"""
+
+    stream_id: int
+    """受信したデータストリームの ID。"""
+
+    group_id: int
+    """Group ID。"""
+
+    object_id: int
+    """Object ID。"""
+
+    payload: bytes
+    """オブジェクトのペイロード。"""
+
+
+@dataclass(slots=True)
+class Subscription:
+    """確立した subscription。"""
+
+    request_id: int
+    """SUBSCRIBE の Request ID。"""
+
+    track_alias: int
+    """SUBSCRIBE_OK で通知された Track Alias。"""
+
+    namespace: tuple[bytes, ...]
+    """Track Namespace。"""
+
+    track_name: bytes
+    """Track 名。"""
+
+    _objects: asyncio.Queue[MoqtObject | None] = field(default_factory=asyncio.Queue)
+    _runtime: Runtime | None = None
+
+    async def objects(self) -> AsyncIterator[MoqtObject]:
+        """受信したオブジェクトを順に返す。
+
+        subscription が終了すると反復も終わる。
+        """
+        while True:
+            item = await self._objects.get()
+            if item is None:
+                return
+            yield item
+
+    async def close(self) -> None:
+        """subscription を終了する。"""
+        if self._runtime is not None:
+            await self._runtime.stop_sending(self.request_id)
+
+    def _push(self, item: MoqtObject) -> None:
+        """受信したオブジェクトをキューへ積む。"""
+        self._objects.put_nowait(item)
+
+    def _finish(self) -> None:
+        """subscription の終了を通知する。"""
+        self._objects.put_nowait(None)
+
+
+@dataclass(slots=True)
+class Announcement:
+    """確立した namespace 購読。"""
+
+    request_id: int
+    """SUBSCRIBE_NAMESPACE の Request ID。"""
+
+    prefix: tuple[bytes, ...]
+    """購読した prefix。"""
+
+    _namespaces: asyncio.Queue[tuple[bytes, ...] | None] = field(default_factory=asyncio.Queue)
+
+    async def namespaces(self) -> AsyncIterator[tuple[bytes, ...]]:
+        """通知された namespace を順に返す。"""
+        while True:
+            item = await self._namespaces.get()
+            if item is None:
+                return
+            yield item
+
+    def _push(self, suffix: tuple[bytes, ...]) -> None:
+        self._namespaces.put_nowait(suffix)
+
+    def _finish(self) -> None:
+        self._namespaces.put_nowait(None)
 
 
 class Client:
-    """WebTransport 接続上で MoQT SETUP を交換する client。"""
+    """WebTransport 接続上で MoQT を扱う client。"""
 
     def __init__(
         self,
@@ -28,18 +133,30 @@ class Client:
             origin=origin,
             ca_file=ca_file,
         )
-        self._core = _CoreSession.client(implementation)
-        self._transport.on_stream_data(self._on_stream_data)
-        self._transport.on_session_closed(self._on_session_closed)
+        self._implementation = implementation
+        self._runtime: Runtime | None = None
         self._established_event = asyncio.Event()
         self._connect_error: BaseException | None = None
         self._run_task: asyncio.Task[None] | None = None
-        self._peer_control_stream_id: int | None = None
+        self._tick_task: asyncio.Task[None] | None = None
+        self._subscriptions: dict[int, Subscription] = {}
+        self._subscriptions_by_alias: dict[int, Subscription] = {}
+        self._announcements: dict[int, Announcement] = {}
+
+        # 受信データはすべてランタイムへ渡す
+        self._transport.on_stream_data(self._on_stream_data)
+        self._transport.on_stream_reset(self._on_stream_reset)
+        self._transport.on_datagram(self._on_datagram)
+        self._transport.on_session_closed(self._on_session_closed)
+        self._transport.on_session_ready(self._on_session_ready)
+
+    # ─── 接続 ───────────────────────────────────────────────
 
     @property
     def established(self) -> bool:
         """MoQT SETUP 交換が完了しているかを返す。"""
-        return self._core.established
+        runtime = self._runtime
+        return runtime is not None and runtime.established
 
     async def connect(self, timeout: float = 10.0) -> None:
         """WebTransport へ接続し、MoQT SETUP 交換の完了を待つ。"""
@@ -49,16 +166,19 @@ class Client:
         # 接続に失敗した場合は webtransport-py が具体的な例外を送出する
         await self._transport.connect(timeout=timeout)
 
-        control_stream_id = await self._transport.open_stream(unidirectional=True)
-        if control_stream_id < 0:
-            await self._transport.close()
-            raise ConnectionError("failed to open the local MoQT control stream")
-
-        await self._transport.send_stream_data(control_stream_id, self._core.start())
+        self._runtime = Runtime(
+            client=True,
+            implementation=self._implementation,
+            ops=self._transport_ops(),
+            events=self._runtime_events(),
+            on_task_error=self._on_task_error,
+        )
         self._run_task = asyncio.create_task(self._transport.run())
         self._run_task.add_done_callback(self._on_run_done)
+        self._tick_task = asyncio.create_task(self._tick_loop())
 
         try:
+            await self._runtime.start()
             await asyncio.wait_for(self._established_event.wait(), timeout=timeout)
         except TimeoutError:
             await self.close()
@@ -71,6 +191,16 @@ class Client:
 
     async def close(self) -> None:
         """MoQT client と WebTransport 接続を閉じる。"""
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._tick_task
+            self._tick_task = None
+        runtime = self._runtime
+        if runtime is not None:
+            with contextlib.suppress(Exception):
+                await runtime.close()
+            self._runtime = None
         await self._transport.close()
         if self._run_task is not None:
             try:
@@ -80,24 +210,175 @@ class Client:
             finally:
                 self._run_task = None
 
-    async def _on_stream_data(self, stream_id: int, data: bytes) -> None:
-        """peer 制御ストリームの受信データを Sans I/O facade へ渡す。"""
-        if self._peer_control_stream_id is None:
-            self._peer_control_stream_id = stream_id
-        elif self._peer_control_stream_id != stream_id:
-            self._fail_connect(
-                RuntimeError(
-                    "received a non-control stream before the minimum SETUP handshake completed"
-                )
-            )
-            return
+    # ─── 公開 API ───────────────────────────────────────────
 
-        try:
-            events = self._core.receive_control(data)
-        except BaseException as error:
-            self._fail_connect(error)
+    async def subscribe(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        parameters: dict[int, object] | None = None,
+    ) -> Subscription:
+        """Track を購読する。"""
+        runtime = self._require_runtime()
+        request_id, event = await runtime.subscribe(namespace, track_name, parameters)
+        track_alias = _body_int(event.message, "track_alias")
+        subscription = Subscription(
+            request_id=request_id,
+            track_alias=track_alias,
+            namespace=tuple(namespace),
+            track_name=track_name,
+            _runtime=runtime,
+        )
+        self._subscriptions[request_id] = subscription
+        self._subscriptions_by_alias[track_alias] = subscription
+        return subscription
+
+    async def subscribe_namespace(
+        self,
+        prefix: Sequence[bytes],
+        parameters: dict[int, object] | None = None,
+    ) -> Announcement:
+        """Namespace を購読する。"""
+        runtime = self._require_runtime()
+        request_id, _event = await runtime.subscribe_namespace(prefix, parameters)
+        announcement = Announcement(request_id=request_id, prefix=tuple(prefix))
+        self._announcements[request_id] = announcement
+        return announcement
+
+    # ─── 内部 ───────────────────────────────────────────────
+
+    def _require_runtime(self) -> Runtime:
+        """接続済みのランタイムを返す。"""
+        runtime = self._runtime
+        if runtime is None or not runtime.established:
+            raise MoqtError("client is not connected")
+        return runtime
+
+    def _transport_ops(self) -> TransportOps:
+        """トランスポート操作を組み立てる。"""
+        transport = self._transport
+        return TransportOps(
+            open_uni_stream=lambda: transport.open_stream(unidirectional=True),
+            open_bidi_stream=lambda: transport.open_stream(unidirectional=False),
+            send_stream_data=lambda stream_id, data, fin: transport.send_stream_data(
+                stream_id, data, fin
+            ),
+            reset_stream=lambda stream_id, error_code: transport.reset_stream(
+                stream_id, error_code
+            ),
+            stop_sending=self._stop_sending,
+            send_datagram=transport.send_datagram,
+            close=lambda _code, _reason: transport.close(),
+        )
+
+    async def _stop_sending(self, stream_id: int, error_code: int) -> None:
+        """受信ストリームへ STOP_SENDING を送る。"""
+        # webtransport-py の client は STOP_SENDING を公開していないため、
+        # ストリームを reset して受信を終わらせる
+        await self._transport.reset_stream(stream_id, error_code)
+
+    def _runtime_events(self) -> RuntimeEvents:
+        """ランタイムのコールバックを組み立てる。"""
+        return RuntimeEvents(
+            on_established=self._on_established,
+            on_close=self._on_close,
+            on_object=self._on_object,
+            on_request_terminated=self._on_request_terminated,
+            on_publish_done=self._on_publish_done,
+            on_namespace=self._on_namespace,
+            on_namespace_done=self._on_namespace_done,
+        )
+
+    async def _on_established(self) -> None:
+        self._established_event.set()
+
+    async def _on_close(self, code: int, reason: str) -> None:
+        self._fail_connect(MoqtError(f"session closed: code={code} reason={reason}"))
+
+    async def _on_object(self, stream_id: int, event: NativeEvent, payload: bytes) -> None:
+        """受信したオブジェクトを subscription へ渡す。
+
+        data stream は Request ID ではなく Track Alias で購読を特定する。
+        Group ID はデータストリームのヘッダが運ぶため、ここではストリームごとに
+        記録した値を使う。
+        """
+        track_alias = event.track_alias
+        if track_alias is None:
             return
-        self._consume_events(events)
+        subscription = self._subscriptions_by_alias.get(track_alias)
+        if subscription is None:
+            return
+        subscription._push(
+            MoqtObject(
+                stream_id=stream_id,
+                group_id=event.group_id or 0,
+                object_id=event.object_id or 0,
+                payload=payload,
+            )
+        )
+
+    async def _on_request_terminated(self, event: NativeEvent) -> None:
+        subscription = self._subscriptions.pop(event.request_id, None)
+        if subscription is not None:
+            self._subscriptions_by_alias.pop(subscription.track_alias, None)
+            subscription._finish()
+
+    async def _on_publish_done(self, event: NativeEvent) -> None:
+        subscription = self._subscriptions.get(event.request_id or -1)
+        if subscription is not None:
+            subscription._finish()
+
+    async def _on_namespace(self, event: NativeEvent) -> None:
+        announcement = self._announcements.get(event.request_id or -1)
+        if announcement is not None:
+            announcement._push(_body_namespace(event.message, "track_namespace_suffix"))
+
+    async def _on_namespace_done(self, event: NativeEvent) -> None:
+        announcement = self._announcements.get(event.request_id or -1)
+        if announcement is not None:
+            announcement._finish()
+
+    async def _on_task_error(self, error: BaseException) -> None:
+        self._fail_connect(error)
+
+    async def _tick_loop(self) -> None:
+        """セッションのタイムアウト判定を定期的に実行する。"""
+        while True:
+            await asyncio.sleep(TICK_INTERVAL)
+            runtime = self._runtime
+            if runtime is None or runtime.closed:
+                return
+            with contextlib.suppress(Exception):
+                await runtime.tick()
+
+    async def _on_stream_data(self, stream_id: int, data: bytes) -> None:
+        runtime = self._runtime
+        if runtime is None:
+            return
+        try:
+            await runtime.receive_stream(stream_id, data)
+        except Exception as error:
+            self._fail_connect(error)
+
+    async def _on_stream_reset(self, stream_id: int, error_code: int | None) -> None:
+        runtime = self._runtime
+        if runtime is None:
+            return
+        with contextlib.suppress(Exception):
+            await runtime.receive_stream_closed(stream_id, error_code)
+
+    async def _on_datagram(self, data: bytes) -> None:
+        runtime = self._runtime
+        if runtime is None:
+            return
+        try:
+            await runtime.receive_datagram(data)
+        except Exception as error:
+            self._fail_connect(error)
+
+    async def _on_session_ready(self, session_id: int) -> None:
+        """WebTransport session の確立を待つ。"""
+        logger.debug("WebTransport session ready: %s", session_id)
 
     async def _on_session_closed(self, session_id: int) -> None:
         """SETUP 完了前の WebTransport session close を接続失敗として扱う。"""
@@ -107,24 +388,6 @@ class Client:
                     f"WebTransport session {session_id} closed before MoQT SETUP completed"
                 )
             )
-
-    def _consume_events(self, events: list[_CoreEvent]) -> None:
-        """native session event を client の状態へ反映する。"""
-        for event in events:
-            if event.kind == "established":
-                self._established_event.set()
-            elif event.kind == "close":
-                self._fail_connect(
-                    ConnectionError(f"peer closed MoQT session: {event.code} {event.reason}")
-                )
-            elif event.kind == "send_control":
-                self._fail_connect(
-                    NotImplementedError(
-                        "sending control messages after SETUP is not implemented yet"
-                    )
-                )
-            else:
-                self._fail_connect(RuntimeError(f"unknown native session event: {event.kind}"))
 
     def _fail_connect(self, error: BaseException) -> None:
         """最初の接続エラーを保存して待機中の connect を起こす。"""
@@ -153,4 +416,22 @@ class Client:
         await self.close()
 
 
-__all__ = ["Client"]
+def _body_int(body: MessageBody | None, key: str) -> int:
+    """メッセージ本体から整数を取り出す。"""
+    if body is None:
+        return 0
+    value = body.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _body_namespace(body: MessageBody | None, key: str) -> tuple[bytes, ...]:
+    """メッセージ本体から Track Namespace を取り出す。"""
+    if body is None:
+        return ()
+    value = body.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(field for field in value if isinstance(field, bytes))
+
+
+__all__ = ["Announcement", "Client", "MoqtObject", "Subscription"]

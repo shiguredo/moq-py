@@ -64,7 +64,7 @@ addopts = ["-ra", "--strict-markers", "--strict-config", "--timeout=10"]
 testpaths = ["tests"]
 python_files = ["test_*.py", "prop_*.py"]
 python_functions = ["test_*", "prop_*"]
-asyncio_mode = "strict"
+asyncio_mode = "auto"
 
 [tool.ty]
 

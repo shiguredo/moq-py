@@ -53,18 +53,18 @@ def test_receive_control_waits_for_the_complete_setup_message() -> None:
     assert client.established
 
 
-def test_receive_control_rejects_a_control_stream_buffer_over_the_limit() -> None:
+def test_receive_control_rejects_an_unexpected_stream_type() -> None:
     """
-    制御ストリームの未完成データが上限を超えた場合に拒否することを確認する。
+    peer 制御ストリームの stream type が SETUP でない場合に拒否することを確認する。
 
-    peer が壊れたストリームを送り続けてもメモリを使い切らないようにする。
+    制御ストリームの stream type は SETUP (0x2F00) でなければならない。
     """
     client = _CoreSession.client("moqt-py-test-client")
     client.start()
 
-    # 128 KiB を超える未完成データは、デコードを試みる前に拒否する。
-    with pytest.raises(ValueError, match="control stream buffer is too large"):
-        client.receive_control(b"\x00" * (128 * 1024 + 1))
+    # stream type 0x00 は制御ストリームでもデータストリームでもない。
+    with pytest.raises(RuntimeError, match="unexpected control stream type"):
+        client.receive_control(b"\x00\x00")
 
 
 def test_client_rejects_an_implementation_option_over_the_wire_limit() -> None:
