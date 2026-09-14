@@ -45,10 +45,9 @@ class Client:
         """WebTransport へ接続し、MoQT SETUP 交換の完了を待つ。"""
         if self._run_task is not None:
             raise RuntimeError("client has already been started")
-        if not await self._transport.connect():
-            raise ConnectionError(
-                f"failed to connect to WebTransport endpoint: {self._transport.url}"
-            )
+
+        # 接続に失敗した場合は webtransport-py が具体的な例外を送出する
+        await self._transport.connect(timeout=timeout)
 
         control_stream_id = await self._transport.open_stream(unidirectional=True)
         if control_stream_id < 0:
