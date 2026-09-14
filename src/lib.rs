@@ -12,7 +12,7 @@
 //! 対応する `receive_*` を呼ぶ。Rust 側は自側が送るべきバイト列をイベントとして
 //! 返し、ストリームの実体には触れない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -44,6 +44,7 @@ use shiguredo_moqt::session::types::{
     Transport,
 };
 use shiguredo_moqt::stream::DataStreamType;
+use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::decoder::{
     DecodedFetchEntry, FetchStreamDecoder, SubgroupStreamDecoder,
 };
@@ -795,6 +796,12 @@ impl CoreEvent {
             ..Self::simple(kind)
         }
     }
+
+    /// 送信元のストリーム ID を設定する。
+    fn on_stream(mut self, stream_id: u64) -> Self {
+        self.stream_id = Some(stream_id);
+        self
+    }
 }
 
 #[pymethods]
@@ -949,6 +956,13 @@ pub(crate) struct CoreSession {
     /// 受信中のデータストリームの Track Alias と Group ID
     /// (subgroup ヘッダで確定する)。
     data_track_aliases: HashMap<u64, (u64, u64)>,
+    /// stream type の varint を消費済みのデータストリーム。
+    ///
+    /// MoQT の単方向ストリームは先頭に stream type を持つ
+    /// (draft-ietf-moq-transport-21 §6.4.1 (Unidirectional Streams))。
+    data_stream_types_received: HashSet<u64>,
+    /// ヘッダをデコード済みのデータストリーム。
+    data_headers_decoded: HashSet<u64>,
     started: bool,
     established: bool,
 }
@@ -990,9 +1004,40 @@ impl CoreSession {
             data_buffers: StreamBuffers::default(),
             data_decoders: HashMap::new(),
             data_track_aliases: HashMap::new(),
+            data_stream_types_received: HashSet::new(),
+            data_headers_decoded: HashSet::new(),
             started: false,
             established: false,
         })
+    }
+
+    /// データストリームの種別を状態機械へ通知し、デコーダを用意する。
+    fn ensure_data_decoder(
+        &mut self,
+        stream_id: u64,
+        stream_type: Option<u64>,
+    ) -> PyResult<DataStreamType> {
+        let Some(stream_type) = stream_type else {
+            return Err(PyValueError::new_err(format!(
+                "stream type is required for the first fragment of data stream {stream_id}"
+            )));
+        };
+        let stream_type = self
+            .session
+            .recv_data_stream_type(DataStreamId(stream_id), stream_type)
+            .map_err(runtime_error)?;
+        // 種別ごとのデコーダを用意する。padding stream は読み捨てるだけである
+        let decoder = match stream_type {
+            DataStreamType::Subgroup => DataStreamDecoder::Subgroup(SubgroupStreamDecoder::new()),
+            DataStreamType::Fetch => DataStreamDecoder::Fetch(Box::new(
+                FetchStreamDecoder::new_with_group_order(DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING)
+                    .map_err(runtime_error)?,
+            )),
+            DataStreamType::Padding => DataStreamDecoder::Padding,
+        };
+        self.data_decoders.insert(stream_id, decoder);
+        self.data_stream_types_received.insert(stream_id);
+        Ok(stream_type)
     }
 
     /// 状態機械が発行したイベントをすべて取り出す。
@@ -1419,7 +1464,9 @@ impl CoreSession {
             .try_decode_message()
             .map_err(runtime_error)?
         {
-            self.session.recv_control(message).map_err(runtime_error)?;
+            if let Err(error) = self.session.recv_control(message) {
+                return Err(runtime_error(error));
+            }
         }
 
         self.drain_events(py)
@@ -1451,14 +1498,6 @@ impl CoreSession {
             .insert(stream_id, RequestStreamRole::Local { request_id });
     }
 
-    /// peer が開始した request stream を登録する。
-    ///
-    /// 応答を返す前に登録すると、以降のメッセージを応答として処理できる。
-    fn register_peer_request_stream(&mut self, stream_id: u64) {
-        self.request_streams
-            .insert(stream_id, RequestStreamRole::Peer);
-    }
-
     /// request stream の断片を投入し、発生したイベントを返す。
     ///
     /// `role` はストリームをどちら側が開始したかを表す。
@@ -1487,29 +1526,32 @@ impl CoreSession {
             self.request_buffers.consume(stream_id, consumed);
             match role {
                 "peer" => {
-                    if self
-                        .request_streams
-                        .insert(stream_id, RequestStreamRole::Peer)
-                        .is_none()
-                    {
-                        // 新しい request stream の最初のメッセージは状態機械が
-                        // イベントを発行しないため、ここで Python 側へ渡す
+                    if self.request_streams.contains_key(&stream_id) {
+                        // 2 通目以降は既存 request へのメッセージとして処理する
+                        let request_id = message_request_id(&message).ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "request stream {stream_id} carries a message without a request id"
+                            ))
+                        })?;
+                        self.session
+                            .recv_stream_message(request_id, message)
+                            .map_err(runtime_error)?;
+                    } else {
+                        // 最初のメッセージは状態機械がイベントを発行しないため、
+                        // ここで Python 側へ渡す
                         let kind = message_kind(&message);
                         let body = message_body_to_python(py, &message)?;
                         let request_id = message_request_id(&message);
                         self.session.recv_request(message).map_err(runtime_error)?;
-                        events.push(CoreEvent::with_message(kind, body, raw, request_id, None));
+                        self.request_streams
+                            .insert(stream_id, RequestStreamRole::Peer);
+                        events.push(
+                            CoreEvent::with_message(kind, body, raw, request_id, None)
+                                .on_stream(stream_id),
+                        );
                         events.extend(self.drain_events(py)?);
                         continue;
                     }
-                    let request_id = message_request_id(&message).ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "request stream {stream_id} carries a message without a request id"
-                        ))
-                    })?;
-                    self.session
-                        .recv_stream_message(request_id, message)
-                        .map_err(runtime_error)?;
                 }
                 _ => {
                     let request_id = match self.request_streams.get(&stream_id) {
@@ -1520,9 +1562,9 @@ impl CoreSession {
                             ))
                         })?,
                     };
-                    self.session
-                        .recv_stream_message(request_id, message)
-                        .map_err(runtime_error)?;
+                    if let Err(error) = self.session.recv_stream_message(request_id, message) {
+                        return Err(runtime_error(error));
+                    }
                 }
             }
             events.extend(self.drain_events(py)?);
@@ -1560,39 +1602,21 @@ impl CoreSession {
     /// 返り値は `(オブジェクトの受理結果, イベント列)` の組である。受理結果は
     /// デコードしたオブジェクトごとに `(stream_id, object_id, payload_length, 受理結果)`
     /// を並べたリストである。
+    #[pyo3(signature = (stream_id, data, stream_type=None))]
     fn receive_data_stream(
         &mut self,
         py: Python<'_>,
         stream_id: u64,
         data: &[u8],
+        stream_type: Option<u64>,
     ) -> PyResult<(Vec<DecodedObjectInfo>, Vec<CoreEvent>)> {
         self.data_buffers.push(stream_id, data)?;
 
-        if !self.data_decoders.contains_key(&stream_id) {
-            let Some((stream_type, consumed)) =
-                decode_varint_prefix(self.data_buffers.get(stream_id)).map_err(runtime_error)?
-            else {
-                return Ok((Vec::new(), Vec::new()));
-            };
-            self.data_buffers.consume(stream_id, consumed);
-            let stream_type = self
-                .session
-                .recv_data_stream_type(DataStreamId(stream_id), stream_type)
-                .map_err(runtime_error)?;
-            // 種別ごとのデコーダを用意する。padding stream は読み捨てるだけである
-            let decoder = match stream_type {
-                DataStreamType::Subgroup => {
-                    DataStreamDecoder::Subgroup(SubgroupStreamDecoder::new())
-                }
-                DataStreamType::Fetch => DataStreamDecoder::Fetch(Box::new(
-                    FetchStreamDecoder::new_with_group_order(
-                        DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING,
-                    )
-                    .map_err(runtime_error)?,
-                )),
-                DataStreamType::Padding => DataStreamDecoder::Padding,
-            };
-            self.data_decoders.insert(stream_id, decoder);
+        // 最初の断片に含まれる stream type を状態機械へ通知する。
+        // stream type の varint は I/O 層が取り除き、種別だけを渡す
+        if !self.data_stream_types_received.contains(&stream_id) {
+            let stream_type = self.ensure_data_decoder(stream_id, stream_type)?;
+            let _ = stream_type;
         }
 
         let buffered = self.data_buffers.get(stream_id).to_vec();
@@ -1604,12 +1628,15 @@ impl CoreSession {
         match self.data_decoders.get_mut(&stream_id) {
             Some(DataStreamDecoder::Subgroup(decoder)) => {
                 decoder.push(&buffered);
-                if let Some(header) = decoder.try_decode_header().map_err(runtime_error)? {
+                if !self.data_headers_decoded.contains(&stream_id)
+                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
+                {
                     self.session
                         .recv_subgroup_header(stream, &header)
                         .map_err(runtime_error)?;
                     self.data_track_aliases
                         .insert(stream_id, (header.track_alias, header.group_id));
+                    self.data_headers_decoded.insert(stream_id);
                 }
                 while let Some(object) = decoder.try_decode_object().map_err(runtime_error)? {
                     let acceptance = self
@@ -1618,25 +1645,24 @@ impl CoreSession {
                         .map_err(runtime_error)?;
                     // ペイロードは状態機械へ渡さないが、デコーダからは必ず取り出す。
                     // 取り出しに成功するとデコーダは次のオブジェクトを読める状態に戻る
-                    let payload = decoder
-                        .try_read_payload()
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "subgroup object payload is incomplete: stream {stream_id} expects {} bytes",
-                                object.payload_length
-                            ))
-                        })?;
+                    let payload = decoder.try_read_payload().ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "subgroup object payload is incomplete: stream {stream_id} expects {} bytes",
+                            object.payload_length
+                        ))
+                    })?;
+                    let acceptance = track_data_acceptance_to_python(acceptance);
                     objects.push((
                         stream_id,
                         object.object_id,
                         object.payload_length,
-                        track_data_acceptance_to_python(acceptance),
+                        acceptance,
                     ));
                     events.push(CoreEvent::object(
                         stream_id,
                         object.object_id,
                         payload,
-                        track_data_acceptance_to_python(acceptance),
+                        acceptance,
                         self.data_track_aliases
                             .get(&stream_id)
                             .map(|(alias, _)| *alias),
@@ -1648,10 +1674,13 @@ impl CoreSession {
             }
             Some(DataStreamDecoder::Fetch(decoder)) => {
                 decoder.push(&buffered);
-                if let Some(header) = decoder.try_decode_header().map_err(runtime_error)? {
+                if !self.data_headers_decoded.contains(&stream_id)
+                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
+                {
                     self.session
                         .recv_fetch_header(stream, &header)
                         .map_err(runtime_error)?;
+                    self.data_headers_decoded.insert(stream_id);
                 }
                 while let Some(entry) = decoder.try_decode_entry().map_err(runtime_error)? {
                     self.session
@@ -1659,32 +1688,58 @@ impl CoreSession {
                         .map_err(runtime_error)?;
                     match entry {
                         DecodedFetchEntry::Object(object) => {
-                            let payload = decoder
-                                .try_read_payload()
-                                .ok_or_else(|| {
-                                    PyRuntimeError::new_err(format!(
-                                        "fetch object payload is incomplete: stream {stream_id} expects {} bytes",
-                                        object.payload_length
-                                    ))
-                                })?;
+                            let payload = decoder.try_read_payload().ok_or_else(|| {
+                                PyRuntimeError::new_err(format!(
+                                    "fetch object payload is incomplete: stream {stream_id} expects {} bytes",
+                                    object.payload_length
+                                ))
+                            })?;
                             objects.push((
                                 stream_id,
                                 object.object_id,
                                 object.payload_length,
                                 "accepted",
                             ));
-                            events.push(CoreEvent::object(
-                                stream_id,
-                                object.object_id,
-                                payload,
-                                "accepted",
-                                None,
-                                Some(object.group_id),
-                            ));
+                            events.push(CoreEvent {
+                                stream_id: Some(stream_id),
+                                object_id: Some(object.object_id),
+                                group_id: Some(object.group_id),
+                                data: Some(payload),
+                                acceptance: Some("accepted"),
+                                ..CoreEvent::simple("object")
+                            });
                         }
-                        DecodedFetchEntry::EndOfNonExistentRange { .. }
-                        | DecodedFetchEntry::EndOfUnknownRange { .. }
-                        | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+                        // End of Range はオブジェクトを運ばないが、範囲の終端を通知する
+                        DecodedFetchEntry::EndOfNonExistentRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_non_existent_range")
+                            });
+                        }
+                        DecodedFetchEntry::EndOfUnknownRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_unknown_range")
+                            });
+                        }
+                        DecodedFetchEntry::EndOfTimedOutRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_timed_out_range")
+                            });
+                        }
                     }
                 }
             }
@@ -1709,6 +1764,8 @@ impl CoreSession {
         self.data_buffers.remove(stream_id);
         self.data_decoders.remove(&stream_id);
         self.data_track_aliases.remove(&stream_id);
+        self.data_stream_types_received.remove(&stream_id);
+        self.data_headers_decoded.remove(&stream_id);
 
         let end = request_stream_end(reset, error_code, reliable_size)?;
         self.session
@@ -1718,15 +1775,32 @@ impl CoreSession {
     }
 
     /// peer のデータグラムを投入し、発生したイベントを返す。
+    ///
+    /// オブジェクトを受理した場合は、その内容を `object` イベントとして返す。
     fn receive_datagram(&mut self, py: Python<'_>, data: &[u8]) -> PyResult<Vec<CoreEvent>> {
         let acceptance = self.session.recv_datagram(data).map_err(runtime_error)?;
         let mut events = self.drain_events(py)?;
-        match acceptance {
-            DatagramAcceptance::Object(acceptance) => events.insert(
-                0,
-                CoreEvent::simple(track_data_acceptance_to_python(acceptance)),
-            ),
-            DatagramAcceptance::Padding => {}
+        if let DatagramAcceptance::Object(acceptance) = acceptance {
+            let acceptance = track_data_acceptance_to_python(acceptance);
+            if acceptance == "accepted" {
+                // 受理したデータグラムを復号し、ペイロードを取り出す
+                let (datagram, consumed) = ObjectDatagram::decode(data).map_err(runtime_error)?;
+                let payload = data[consumed..].to_vec();
+                events.insert(
+                    0,
+                    CoreEvent {
+                        stream_id: None,
+                        object_id: Some(datagram.object_id),
+                        track_alias: Some(datagram.track_alias),
+                        group_id: Some(datagram.group_id),
+                        acceptance: Some(acceptance),
+                        data: Some(payload),
+                        ..CoreEvent::simple("object")
+                    },
+                );
+            } else {
+                events.insert(0, CoreEvent::simple(acceptance));
+            }
         }
         Ok(events)
     }

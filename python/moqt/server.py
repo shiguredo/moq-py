@@ -84,6 +84,90 @@ class SubscriptionRequest:
 
 
 @dataclass(slots=True)
+class FetchRequest:
+    """peer から届いた FETCH。"""
+
+    request_id: int
+    """FETCH の Request ID。"""
+
+    namespace: tuple[bytes, ...]
+    """Track Namespace。"""
+
+    track_name: bytes
+    """Track 名。"""
+
+    parameters: dict[int, object]
+    """取得条件のパラメータ。"""
+
+    runtime: Runtime
+    """応答に使うランタイム。"""
+
+    async def respond(
+        self,
+        end_location: tuple[int, int],
+        *,
+        end_of_track: bool = False,
+        parameters: dict[int, object] | None = None,
+        track_properties: dict[int, object] | None = None,
+    ) -> FetchResponse:
+        """FETCH_OK を返して応答ストリームを開く。"""
+        await self.runtime.send_fetch_ok(
+            self.request_id,
+            end_location,
+            end_of_track=end_of_track,
+            parameters=parameters,
+            track_properties=track_properties,
+        )
+        stream_id = await self.runtime.open_fetch_stream(self.request_id)
+        return FetchResponse(
+            request_id=self.request_id,
+            stream_id=stream_id,
+            runtime=self.runtime,
+        )
+
+    async def reject(self, error_code: int, reason: str) -> None:
+        """REQUEST_ERROR を返して取得を拒否する。"""
+        await self.runtime.send_request_error(self.request_id, error_code, reason)
+
+
+@dataclass(slots=True)
+class FetchResponse:
+    """配信中の fetch 応答。"""
+
+    request_id: int
+    """FETCH の Request ID。"""
+
+    stream_id: int
+    """応答に使う fetch stream の ID。"""
+
+    runtime: Runtime
+    """送信に使うランタイム。"""
+
+    async def send_object(
+        self,
+        group_id: int,
+        object_id: int,
+        payload: bytes,
+        *,
+        publisher_priority: int = 128,
+        subgroup_id: int = 0,
+    ) -> None:
+        """fetch stream へオブジェクトを書き込む。"""
+        await self.runtime.send_fetch_stream_object(
+            self.stream_id,
+            group_id,
+            object_id,
+            payload,
+            publisher_priority=publisher_priority,
+            subgroup_id=subgroup_id,
+        )
+
+    async def close(self) -> None:
+        """fetch stream を終了する。"""
+        await self.runtime.close_fetch_stream(self.stream_id)
+
+
+@dataclass(slots=True)
 class Publication:
     """配信中の Track。"""
 
@@ -184,6 +268,7 @@ class Server:
         self._connections: dict[tuple[tuple[str, int], int], _Connection] = {}
         self._on_session_established: Callable[[ServerSession], Awaitable[None]] | None = None
         self._on_subscribe: Callable[[SubscriptionRequest], Awaitable[None]] | None = None
+        self._on_fetch: Callable[[FetchRequest], Awaitable[None]] | None = None
         self._tick_task: asyncio.Task[None] | None = None
 
         self._transport.on_session_ready(self._on_session_ready)
@@ -212,6 +297,13 @@ class Server:
     ) -> None:
         """peer から SUBSCRIBE が届いたときに呼び出す非同期 callback を設定する。"""
         self._on_subscribe = callback
+
+    def on_fetch(
+        self,
+        callback: Callable[[FetchRequest], Awaitable[None]],
+    ) -> None:
+        """peer から FETCH が届いたときに呼び出す非同期 callback を設定する。"""
+        self._on_fetch = callback
 
     async def start(self) -> None:
         """WebTransport server を開始する。"""
@@ -302,6 +394,24 @@ class Server:
         if connection is None:
             return
         runtime = connection.runtime
+        if event.kind == "fetch":
+            if self._on_fetch is None:
+                await runtime.send_request_error(
+                    event.request_id or 0,
+                    0x3,
+                    "FETCH is not handled by this server",
+                )
+                return
+            body = event.message
+            request = FetchRequest(
+                request_id=event.request_id or 0,
+                namespace=_body_namespace(body, "track_namespace"),
+                track_name=_body_bytes(body, "track_name"),
+                parameters=_body_parameters(body),
+                runtime=runtime,
+            )
+            await self._on_fetch(request)
+            return
         if event.kind != "subscribe":
             # SUBSCRIBE 以外の request は未対応として拒否する
             await runtime.send_request_error(
@@ -437,6 +547,8 @@ def _body_parameters(body: MessageBody | None) -> dict[int, object]:
 
 
 __all__ = [
+    "FetchRequest",
+    "FetchResponse",
     "Publication",
     "Server",
     "ServerSession",

@@ -188,6 +188,7 @@ class RuntimeEvents:
     on_namespace_done: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_goaway: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_object: Callable[[int, NativeEvent, bytes], Awaitable[None]] | None = None
+    on_fetch_end: Callable[[str, NativeEvent], Awaitable[None]] | None = None
 
     def bind(self, context: object) -> RuntimeEvents:
         """コールバックを接続に紐付けた新しい `RuntimeEvents` を返す。
@@ -225,6 +226,7 @@ class RuntimeEvents:
             on_namespace_done=wrap(self.on_namespace_done),
             on_goaway=wrap(self.on_goaway),
             on_object=wrap(self.on_object),
+            on_fetch_end=wrap(self.on_fetch_end),
         )
 
 
@@ -279,11 +281,17 @@ class Runtime:
         self._request_streams: dict[int, int] = {}
         # 自側が開始したストリーム ID
         self._local_streams: set[int] = set()
+        # stream type を通知済みのデータストリーム
+        self._data_stream_types: dict[int, int] = {}
         # 自側が開始した subgroup ストリームの送信状態 (Request ID 索引)
         self._subgroups: dict[int, SubgroupWriter] = {}
         self._closed = False
 
     # ─── 状態 ───────────────────────────────────────────────
+
+    def subscription_track_alias(self, request_id: int) -> int:
+        """subscription の Track Alias を返す。未確定の場合は 0 を返す。"""
+        return self._core.subscription_track_alias(request_id) or 0
 
     @property
     def established(self) -> bool:
@@ -333,7 +341,16 @@ class Runtime:
             role = "local" if stream_id in self._local_streams else "peer"
             await self._apply_events(self._core.receive_request_stream(stream_id, data, role))
         else:
-            _objects, events = self._core.receive_data_stream(stream_id, data)
+            # 単方向ストリームは先頭に stream type の varint を持つ。生バイト列は
+            # そのままネイティブ実装へ渡し、種別だけを最初の断片で通知する
+            stream_type = self._data_stream_types.get(stream_id)
+            if stream_type is None:
+                stream_type = _decode_first_varint(data)
+                if stream_type is None:
+                    # varint が途中の場合は次の断片で判定する
+                    return
+                self._data_stream_types[stream_id] = stream_type
+            _objects, events = self._core.receive_data_stream(stream_id, data, stream_type)
             await self._apply_events(events)
 
     async def receive_stream_closed(
@@ -343,6 +360,7 @@ class Runtime:
     ) -> None:
         """WebTransport のストリーム終端を状態機械へ通知する。"""
         info = self._streams.pop(stream_id, None)
+        self._data_stream_types.pop(stream_id, None)
         if info is None:
             return
         reset = error_code is not None
@@ -381,18 +399,9 @@ class Runtime:
         """SUBSCRIBE を送信し、応答を待つ。"""
         merged = dict(parameters or {})
         merged.setdefault(_native.PARAM_SUBSCRIBER_PRIORITY, DEFAULT_SUBSCRIBER_PRIORITY)
-        request_id = self._core.next_local_request_id()
-        pending = _PendingRequest()
-        self._pending_requests[request_id] = pending
-        try:
-            await self._apply_events(
-                self._core.send_subscribe(list(namespace), track_name, merged),
-                request_id=request_id,
-            )
-            return request_id, await pending.future
-        except BaseException:
-            self._pending_requests.pop(request_id, None)
-            raise
+        return await self._start_request(
+            lambda request_id: self._core.send_subscribe(list(namespace), track_name, merged)
+        )
 
     async def publish(
         self,
@@ -403,24 +412,15 @@ class Runtime:
         track_properties: dict[int, object] | None = None,
     ) -> tuple[int, NativeEvent]:
         """PUBLISH を送信し、応答を待つ。"""
-        request_id = self._core.next_local_request_id()
-        pending = _PendingRequest()
-        self._pending_requests[request_id] = pending
-        try:
-            await self._apply_events(
-                self._core.send_publish(
-                    list(namespace),
-                    track_name,
-                    track_alias,
-                    dict(parameters or {}),
-                    dict(track_properties or {}),
-                ),
-                request_id=request_id,
+        return await self._start_request(
+            lambda request_id: self._core.send_publish(
+                list(namespace),
+                track_name,
+                track_alias,
+                dict(parameters or {}),
+                dict(track_properties or {}),
             )
-            return request_id, await pending.future
-        except BaseException:
-            self._pending_requests.pop(request_id, None)
-            raise
+        )
 
     async def announce(
         self,
@@ -428,18 +428,124 @@ class Runtime:
         parameters: dict[int, object] | None = None,
     ) -> tuple[int, NativeEvent]:
         """PUBLISH_NAMESPACE を送信し、応答を待つ。"""
-        request_id = self._core.next_local_request_id()
-        pending = _PendingRequest()
-        self._pending_requests[request_id] = pending
-        try:
-            await self._apply_events(
-                self._core.send_publish_namespace(list(namespace), dict(parameters or {})),
-                request_id=request_id,
+        return await self._start_request(
+            lambda request_id: self._core.send_publish_namespace(
+                list(namespace), dict(parameters or {})
             )
-            return request_id, await pending.future
-        except BaseException:
-            self._pending_requests.pop(request_id, None)
-            raise
+        )
+
+    async def fetch(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        parameters: dict[int, object] | None = None,
+        on_request_id: Callable[[int], None] | None = None,
+    ) -> tuple[int, NativeEvent]:
+        """FETCH を送信し、FETCH_OK を待つ。
+
+        取得範囲は LOCATION_FILTER パラメータで指定する。`on_request_id` は
+        Request ID が確定した時点で呼ばれる。FETCH_OK より先に fetch stream の
+        オブジェクトが届く場合に備え、応答を待つ前に登録するために使う。
+        """
+        return await self._start_request(
+            lambda request_id: self._core.send_fetch(
+                list(namespace), track_name, dict(parameters or {})
+            ),
+            on_request_id=on_request_id,
+        )
+
+    async def track_status(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        parameters: dict[int, object] | None = None,
+    ) -> tuple[int, NativeEvent]:
+        """TRACK_STATUS を送信し、応答を待つ。"""
+        return await self._start_request(
+            lambda request_id: self._core.send_track_status(
+                list(namespace), track_name, dict(parameters or {})
+            )
+        )
+
+    async def subscribe_tracks(
+        self,
+        prefix: Sequence[bytes],
+        parameters: dict[int, object] | None = None,
+    ) -> tuple[int, NativeEvent]:
+        """SUBSCRIBE_TRACKS を送信し、応答を待つ。"""
+        return await self._start_request(
+            lambda request_id: self._core.send_subscribe_tracks(
+                list(prefix), dict(parameters or {})
+            )
+        )
+
+    async def send_publish_state_notify(
+        self,
+        request_id: int,
+        parameters: dict[int, object] | None = None,
+    ) -> None:
+        """PUBLISH_STATE_NOTIFY を送信する。"""
+        await self._apply_events(
+            self._core.send_publish_state_notify(request_id, dict(parameters or {}))
+        )
+
+    async def open_fetch_stream(self, request_id: int) -> int:
+        """fetch 応答用の単方向ストリームを開き、状態機械へ登録する。
+
+        Returns:
+            ストリーム ID
+        """
+        stream_id = await self._ops.open_uni_stream()
+        if stream_id < 0:
+            raise ConnectionError("failed to open a fetch stream")
+        await self._apply_events(self._core.send_fetch_header(stream_id, request_id))
+        await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
+        self._local_streams.add(stream_id)
+        self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
+        return stream_id
+
+    async def send_fetch_stream_object(
+        self,
+        stream_id: int,
+        group_id: int,
+        object_id: int,
+        payload: bytes,
+        *,
+        publisher_priority: int = 128,
+        subgroup_id: int = 0,
+    ) -> None:
+        """開いた fetch stream へオブジェクトを書き込む。"""
+        await self._apply_events(self._core.send_fetch_object(stream_id))
+        await self._ops.send_stream_data(
+            stream_id,
+            _encode_fetch_object(group_id, object_id, payload, publisher_priority, subgroup_id),
+            False,
+        )
+
+    async def close_fetch_stream(self, stream_id: int) -> None:
+        """fetch stream を終了する。"""
+        await self._ops.send_stream_data(stream_id, b"", True)
+        await self._apply_events(self._core.send_fetch_data_stream_closed(stream_id))
+
+    async def send_fetch_ok(
+        self,
+        request_id: int,
+        end_location: tuple[int, int],
+        *,
+        end_of_track: bool = False,
+        parameters: dict[int, object] | None = None,
+        track_properties: dict[int, object] | None = None,
+    ) -> None:
+        """FETCH_OK を送信する。"""
+        await self._apply_events(
+            self._core.send_fetch_ok(
+                request_id,
+                end_of_track,
+                end_location,
+                dict(parameters or {}),
+                dict(track_properties or {}),
+            )
+        )
 
     async def subscribe_namespace(
         self,
@@ -447,15 +553,40 @@ class Runtime:
         parameters: dict[int, object] | None = None,
     ) -> tuple[int, NativeEvent]:
         """SUBSCRIBE_NAMESPACE を送信し、応答を待つ。"""
-        request_id = self._core.next_local_request_id()
-        pending = _PendingRequest()
-        self._pending_requests[request_id] = pending
-        try:
-            await self._apply_events(
-                self._core.send_subscribe_namespace(list(prefix), dict(parameters or {})),
-                request_id=request_id,
+        return await self._start_request(
+            lambda request_id: self._core.send_subscribe_namespace(
+                list(prefix), dict(parameters or {})
             )
+        )
+
+    async def _start_request(
+        self,
+        send: Callable[[int], Iterable[NativeEvent]],
+        on_request_id: Callable[[int], None] | None = None,
+    ) -> tuple[int, NativeEvent]:
+        """自側が開始する request を送信し、応答を待つ。
+
+        Request ID はプロトコル状態機械が採番する。I/O 層は `send_request`
+        イベントで通知される ID をストリームへ対応付ける。
+        """
+        pending = _PendingRequest()
+        request_id: int | None = None
+        events = send(0)
+        for event in events:
+            if event.kind == "send_request" and event.request_id is not None:
+                request_id = event.request_id
+                self._pending_requests[request_id] = pending
+                if on_request_id is not None:
+                    on_request_id(request_id)
+            await self._apply_events([event])
+        if request_id is None:
+            raise MoqtError("request message did not produce a send_request event")
+        try:
             return request_id, await pending.future
+        except SessionClosedError as error:
+            logger.error("MoQT request %s failed: %s", request_id, error)
+            self._pending_requests.pop(request_id, None)
+            raise
         except BaseException:
             self._pending_requests.pop(request_id, None)
             raise
@@ -668,9 +799,6 @@ class Runtime:
         if _is_bidirectional(stream_id):
             info = StreamInfo(kind=_STREAM_REQUEST)
             self._streams[stream_id] = info
-            if stream_id not in self._local_streams:
-                # 応答メッセージは Request ID を運ばないため、peer 起点として登録する
-                self._core.register_peer_request_stream(stream_id)
             return info
 
         # 単方向ストリームは先頭の stream type で種別が決まる
@@ -711,6 +839,12 @@ class Runtime:
                 await self._handle_close(event)
             elif kind == "object":
                 await self._handle_object(event)
+            elif kind in {
+                "end_of_non_existent_range",
+                "end_of_unknown_range",
+                "end_of_timed_out_range",
+            }:
+                await self._notify(self._events.on_fetch_end, kind, event)
             elif kind in {"reset_data_stream", "send_padding_stream", "send_padding_datagram"}:
                 await self._handle_data_control(event)
             elif kind in {"accepted", "unknown_track_alias", "discarded", "filtered_out"}:
@@ -890,6 +1024,7 @@ class Runtime:
 
     async def _handle_close(self, event: NativeEvent) -> None:
         """セッション終了を処理する。"""
+        logger.error("MoQT close code=%s reason=%s", event.code, event.reason)
         self._closed = True
         code = int(event.code or 0)
         reason = str(event.reason or "")
@@ -965,6 +1100,16 @@ def _encode_varint(value: int) -> bytes:
     if value < 1 << 62:
         return (value | 0xC000_0000_0000_0000).to_bytes(8, "big")
     raise ValueError(f"varint is out of range: {value}")
+
+
+def _varint_length(first: int) -> int:
+    """先頭バイトから vi64 のエンコード長を返す。"""
+    if first == 0xFF:
+        return 9
+    length = 1
+    while length < 8 and first & (0x80 >> (length - 1)):
+        length += 1
+    return length
 
 
 def _decode_first_varint(data: bytes) -> int | None:
@@ -1043,6 +1188,45 @@ def _encode_subgroup_header(
     if publisher_priority is not None:
         header.append(publisher_priority)
     return bytes(header)
+
+
+def _encode_fetch_header(request_id: int) -> bytes:
+    """FETCH_HEADER をエンコードする (draft-ietf-moq-transport-21 §11.4.1)。
+
+    ストリーム先頭の stream type (0x05) と Request ID を並べる。
+    """
+    body = bytearray()
+    body += _encode_varint(FETCH_HEADER_TYPE)
+    body += _encode_varint(request_id)
+    return bytes(body)
+
+
+def _encode_fetch_object(
+    group_id: int,
+    object_id: int,
+    payload: bytes,
+    publisher_priority: int,
+    subgroup_id: int,
+) -> bytes:
+    """fetch stream のオブジェクトをエンコードする
+    (draft-ietf-moq-transport-21 §11.4.2)。
+
+    先頭のオブジェクトは Group ID / Subgroup ID / Object ID / Publisher Priority を
+    すべて明示する。
+    """
+    flags = 0x03  # Subgroup ID: Explicit
+    flags |= 0x04  # Object ID あり
+    flags |= 0x08  # Group ID あり
+    flags |= 0x10  # Publisher Priority あり
+    body = bytearray()
+    body += _encode_varint(flags)
+    body += _encode_varint(group_id)
+    body += _encode_varint(subgroup_id)
+    body += _encode_varint(object_id)
+    body.append(publisher_priority)
+    body += _encode_varint(len(payload))
+    body += payload
+    return bytes(body)
 
 
 def _encode_subgroup_object(object_id_delta: int, payload: bytes) -> bytes:

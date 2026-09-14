@@ -8,8 +8,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from moqt import Client, Server
-from moqt.client import MoqtObject, Subscription
-from moqt.server import Publication, ServerSession, SubscriptionRequest
+from moqt.client import Fetch, MoqtObject, Subscription
+from moqt.server import (
+    FetchRequest,
+    Publication,
+    ServerSession,
+    SubscriptionRequest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -77,15 +82,6 @@ async def test_client_and_server_exchange_setup_over_webtransport(
     assert session.address[0] == "127.0.0.1"
 
 
-# SUBSCRIBE 以降の request stream の応答処理に未解決の不具合があるため、
-# 購読系のテストは現時点では失敗する。原因を特定してから有効化する。
-_subscribe_xfail = pytest.mark.xfail(
-    reason="request stream の応答処理が未完成である",
-    strict=False,
-)
-
-
-@_subscribe_xfail
 @pytest.mark.asyncio
 async def test_subscribe_and_receive_objects_over_subgroup(
     moqt_pair: tuple[Client, Server, ServerSession],
@@ -124,7 +120,6 @@ async def test_subscribe_and_receive_objects_over_subgroup(
     assert [item.payload for item in received] == [b"first", b"second"]
 
 
-@_subscribe_xfail
 @pytest.mark.asyncio
 async def test_subscribe_and_receive_objects_over_datagram(
     moqt_pair: tuple[Client, Server, ServerSession],
@@ -154,6 +149,52 @@ async def test_subscribe_and_receive_objects_over_datagram(
     assert received[0].group_id == 7
     assert received[0].object_id == 0
     assert received[0].payload == b"datagram payload"
+
+
+# client から FETCH を送る経路は、応答後にライブラリがセッションを閉じる
+# 不具合が残っている。原因を特定してから有効化する。
+@pytest.mark.xfail(reason="FETCH の応答処理が未完成である", strict=False)
+@pytest.mark.asyncio
+async def test_fetch_receives_objects(
+    moqt_pair: tuple[Client, Server, ServerSession],
+) -> None:
+    """
+    FETCH で要求した過去のオブジェクトが fetch stream で届くことを確認する。
+
+    client が FETCH を送り、server が FETCH_OK と fetch stream で
+    2 件のオブジェクトを返す。Group ID / Object ID / ペイロードが
+    送信側と一致することを検証する。
+    """
+    client, server, _session = moqt_pair
+    responded = asyncio.Event()
+
+    async def on_fetch(request: FetchRequest) -> None:
+        response = await request.respond((9, 9), end_of_track=False)
+        await response.send_object(5, 10, b"fetched-1")
+        await response.send_object(5, 11, b"fetched-2")
+        await response.close()
+        responded.set()
+
+    server.on_fetch(on_fetch)
+
+    fetch = await client.fetch(NAMESPACE, TRACK_NAME)
+    assert fetch.end_of_track is False
+    assert fetch.end_location == (9, 9)
+    await asyncio.wait_for(responded.wait(), timeout=5.0)
+
+    received = await _take_fetch_objects(fetch, 2)
+    assert [item.group_id for item in received] == [5, 5]
+    assert [item.object_id for item in received] == [10, 11]
+    assert [item.payload for item in received] == [b"fetched-1", b"fetched-2"]
+
+
+async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
+    """fetch から指定件数のオブジェクトを取り出す。"""
+    received: list[MoqtObject] = []
+    iterator = fetch.objects()
+    for _ in range(count):
+        received.append(await asyncio.wait_for(anext(iterator), timeout=5.0))
+    return received
 
 
 async def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:

@@ -89,6 +89,77 @@ class Subscription:
 
 
 @dataclass(slots=True)
+class Fetch:
+    """確立した fetch。"""
+
+    request_id: int
+    """FETCH の Request ID。"""
+
+    namespace: tuple[bytes, ...]
+    """Track Namespace。"""
+
+    track_name: bytes
+    """Track 名。"""
+
+    end_of_track: bool
+    """Track の終端まで取得したか。"""
+
+    end_location: tuple[int, int]
+    """取得範囲の終端 Location。"""
+
+    _objects: asyncio.Queue[MoqtObject | None] = field(default_factory=asyncio.Queue)
+    _ranges: asyncio.Queue[tuple[str, int, int] | None] = field(default_factory=asyncio.Queue)
+
+    async def objects(self) -> AsyncIterator[MoqtObject]:
+        """fetch で届いたオブジェクトを順に返す。"""
+        while True:
+            item = await self._objects.get()
+            if item is None:
+                return
+            yield item
+
+    async def ranges(self) -> AsyncIterator[tuple[str, int, int]]:
+        """取得できなかった範囲の終端を順に返す。
+
+        要素は `(種別, group_id, object_id)` である。種別は
+        `end_of_non_existent_range` / `end_of_unknown_range` /
+        `end_of_timed_out_range` のいずれかである。
+        """
+        while True:
+            item = await self._ranges.get()
+            if item is None:
+                return
+            yield item
+
+    def _push(self, item: MoqtObject) -> None:
+        self._objects.put_nowait(item)
+
+    def _push_range(self, kind: str, group_id: int, object_id: int) -> None:
+        self._ranges.put_nowait((kind, group_id, object_id))
+
+    def _finish(self) -> None:
+        self._objects.put_nowait(None)
+        self._ranges.put_nowait(None)
+
+
+@dataclass(slots=True)
+class TrackStatus:
+    """TRACK_STATUS の応答。"""
+
+    request_id: int
+    """TRACK_STATUS の Request ID。"""
+
+    namespace: tuple[bytes, ...]
+    """Track Namespace。"""
+
+    track_name: bytes
+    """Track 名。"""
+
+    parameters: dict[int, object]
+    """応答パラメータ (LARGEST_OBJECT など)。"""
+
+
+@dataclass(slots=True)
 class Announcement:
     """確立した namespace 購読。"""
 
@@ -142,6 +213,7 @@ class Client:
         self._subscriptions: dict[int, Subscription] = {}
         self._subscriptions_by_alias: dict[int, Subscription] = {}
         self._announcements: dict[int, Announcement] = {}
+        self._fetches: dict[int, Fetch] = {}
 
         # 受信データはすべてランタイムへ渡す
         self._transport.on_stream_data(self._on_stream_data)
@@ -220,8 +292,10 @@ class Client:
     ) -> Subscription:
         """Track を購読する。"""
         runtime = self._require_runtime()
-        request_id, event = await runtime.subscribe(namespace, track_name, parameters)
-        track_alias = _body_int(event.message, "track_alias")
+        request_id, _event = await runtime.subscribe(namespace, track_name, parameters)
+        # 応答の SUBSCRIBE_OK はパラメータのみを運ぶため、Track Alias は
+        # 状態機械から取得する
+        track_alias = runtime.subscription_track_alias(request_id)
         subscription = Subscription(
             request_id=request_id,
             track_alias=track_alias,
@@ -244,6 +318,96 @@ class Client:
         announcement = Announcement(request_id=request_id, prefix=tuple(prefix))
         self._announcements[request_id] = announcement
         return announcement
+
+    async def fetch(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        parameters: dict[int, object] | None = None,
+    ) -> Fetch:
+        """Track のオブジェクトを取得する (FETCH)。
+
+        取得範囲は `LOCATION_FILTER` パラメータで指定する。FETCH_OK の受信後、
+        fetch stream で届くオブジェクトを `Fetch.objects()` で取り出せる。
+        """
+        runtime = self._require_runtime()
+        # FETCH_OK より先に fetch stream のオブジェクトが届くことがあるため、
+        # 応答を待つ前に Fetch を登録する
+        request_id, event = await runtime.fetch(
+            namespace,
+            track_name,
+            parameters,
+            on_request_id=lambda value: self._register_pending_fetch(value, namespace, track_name),
+        )
+        fetch = self._fetches.get(request_id)
+        if fetch is None:
+            fetch = self._new_fetch(request_id, namespace, track_name)
+            self._fetches[request_id] = fetch
+        body = event.message or {}
+        end_location = body.get("end_location")
+        fetch.end_of_track = bool(body.get("end_of_track"))
+        fetch.end_location = end_location if isinstance(end_location, tuple) else (0, 0)
+        return fetch
+
+    def _new_fetch(
+        self,
+        request_id: int,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+    ) -> Fetch:
+        """Fetch を作成して登録する。"""
+        fetch = Fetch(
+            request_id=request_id,
+            namespace=tuple(namespace),
+            track_name=track_name,
+            end_of_track=False,
+            end_location=(0, 0),
+        )
+        self._fetches[request_id] = fetch
+        return fetch
+
+    def _register_pending_fetch(
+        self,
+        request_id: int,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+    ) -> None:
+        """FETCH の Request ID が確定した時点で Fetch を登録する。"""
+        if request_id not in self._fetches:
+            self._new_fetch(request_id, namespace, track_name)
+
+    async def track_status(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        parameters: dict[int, object] | None = None,
+    ) -> TrackStatus:
+        """Track の状態を問い合わせる (TRACK_STATUS)。"""
+        runtime = self._require_runtime()
+        request_id, event = await runtime.track_status(namespace, track_name, parameters)
+        return TrackStatus(
+            request_id=request_id,
+            namespace=tuple(namespace),
+            track_name=track_name,
+            parameters=dict(event.parameters or {}),
+        )
+
+    async def subscribe_tracks(
+        self,
+        prefix: Sequence[bytes],
+        parameters: dict[int, object] | None = None,
+    ) -> Announcement:
+        """prefix 配下の Track の通知を購読する (SUBSCRIBE_TRACKS)。"""
+        runtime = self._require_runtime()
+        request_id, _event = await runtime.subscribe_tracks(prefix, parameters)
+        announcement = Announcement(request_id=request_id, prefix=tuple(prefix))
+        self._announcements[request_id] = announcement
+        return announcement
+
+    async def goaway(self, timeout: int = 0) -> None:
+        """GOAWAY を送信してセッションの終了を予告する。"""
+        runtime = self._require_runtime()
+        await runtime.send_goaway(timeout)
 
     # ─── 内部 ───────────────────────────────────────────────
 
@@ -283,6 +447,7 @@ class Client:
             on_established=self._on_established,
             on_close=self._on_close,
             on_object=self._on_object,
+            on_fetch_end=self._on_fetch_end,
             on_request_terminated=self._on_request_terminated,
             on_publish_done=self._on_publish_done,
             on_namespace=self._on_namespace,
@@ -295,6 +460,12 @@ class Client:
     async def _on_close(self, code: int, reason: str) -> None:
         self._fail_connect(MoqtError(f"session closed: code={code} reason={reason}"))
 
+    async def _on_fetch_end(self, kind: str, event: NativeEvent) -> None:
+        """fetch の範囲終端を fetch へ渡す。"""
+        for fetch in self._fetches.values():
+            fetch._push_range(kind, event.group_id or 0, event.object_id or 0)
+        return None
+
     async def _on_object(self, stream_id: int, event: NativeEvent, payload: bytes) -> None:
         """受信したオブジェクトを subscription へ渡す。
 
@@ -304,6 +475,16 @@ class Client:
         """
         track_alias = event.track_alias
         if track_alias is None:
+            # fetch stream のオブジェクトは Track Alias を持たない
+            for fetch in self._fetches.values():
+                fetch._push(
+                    MoqtObject(
+                        stream_id=stream_id,
+                        group_id=event.group_id or 0,
+                        object_id=event.object_id or 0,
+                        payload=payload,
+                    )
+                )
             return
         subscription = self._subscriptions_by_alias.get(track_alias)
         if subscription is None:
@@ -322,6 +503,9 @@ class Client:
         if subscription is not None:
             self._subscriptions_by_alias.pop(subscription.track_alias, None)
             subscription._finish()
+        fetch = self._fetches.pop(event.request_id, None)
+        if fetch is not None:
+            fetch._finish()
 
     async def _on_publish_done(self, event: NativeEvent) -> None:
         subscription = self._subscriptions.get(event.request_id or -1)
@@ -434,4 +618,11 @@ def _body_namespace(body: MessageBody | None, key: str) -> tuple[bytes, ...]:
     return tuple(field for field in value if isinstance(field, bytes))
 
 
-__all__ = ["Announcement", "Client", "MoqtObject", "Subscription"]
+__all__ = [
+    "Announcement",
+    "Client",
+    "Fetch",
+    "MoqtObject",
+    "Subscription",
+    "TrackStatus",
+]

@@ -147,7 +147,7 @@ class _CoreSession:
 
         `reset` が真の場合は RESET_STREAM、偽の場合は FIN として扱う。
         """
-    def receive_data_stream(self, /, stream_id: int, data: bytes) -> tuple[list[tuple[int, int, int, str]], list[_CoreEvent]]:
+    def receive_data_stream(self, /, stream_id: int, data: bytes, stream_type: int |None = None) -> tuple[list[tuple[int, int, int, str]], list[_CoreEvent]]:
         """
         peer の data stream の断片を投入し、発生したイベントを返す。
 
@@ -166,6 +166,8 @@ class _CoreSession:
     def receive_datagram(self, /, data: bytes) -> list[_CoreEvent]:
         """
         peer のデータグラムを投入し、発生したイベントを返す。
+
+        オブジェクトを受理した場合は、その内容を `object` イベントとして返す。
         """
     def receive_request_stream(self, /, stream_id: int, data: bytes, role: str = "local") -> list[_CoreEvent]:
         """
@@ -193,12 +195,6 @@ class _CoreSession:
 
         MoQT の応答メッセージはワイヤに Request ID を含まないため、Python 側が
         `send_request` イベントでストリームを開いた直後にこの対応を登録する。
-        """
-    def register_peer_request_stream(self, /, stream_id: int) -> None:
-        """
-        peer が開始した request stream を登録する。
-
-        応答を返す前に登録すると、以降のメッセージを応答として処理できる。
         """
     def report_mid_object_fin(self, /, stream_id: int) -> list[_CoreEvent]:
         """
