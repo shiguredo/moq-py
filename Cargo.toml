@@ -15,9 +15,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python バインディングと型スタブ生成用の introspection
-pyo3 = { version = "0.29", features = [
-  "extension-module",
-  "experimental-inspect"
-] }
+pyo3 = { version = "0.29", features = ["extension-module", "experimental-inspect"] }
 # MoQT の Sans I/O codec と Session 状態機械
-shiguredo_moqt = { path = "../../shiguredo-rust/moqt-rs" }
+# 公開リポジトリにタグ付けされたリリースがまだ存在しないため、開発ブランチの
+# 特定コミットに固定する。リリースタグが作成されたら tag 指定へ切り替える
+shiguredo_moqt = { git = "https://github.com/shiguredo/moqt-rs.git", rev = "5ddd5142b728f2bac2120827cc85bbb183c234c6" }

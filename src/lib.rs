@@ -6,17 +6,58 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use shiguredo_moqt::decoder::MessageDecoder;
-use shiguredo_moqt::stream::encode_control_stream_setup;
-use shiguredo_moqt::{
-    ControlMessage, Session, SessionEvent, SetupOption, SetupOptionValue, SetupOptions, Transport,
+use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::message::ControlMessage;
+use shiguredo_moqt::parameter::{
+    SETUP_OPTION_MOQT_IMPLEMENTATION, SetupOption, SetupOptionValue, SetupOptions,
 };
+use shiguredo_moqt::session::core::Session;
+use shiguredo_moqt::session::types::{SessionEvent, Transport};
+use shiguredo_moqt::stream::encode_control_stream_setup;
+use shiguredo_moqt::varint;
 
 /// Python から 1 回に渡せる制御ストリームデータの上限。
 ///
-/// draft-ietf-moq-transport-19 の制御メッセージ長は u16 で表現される。
-/// partial message と次のメッセージを同時に保持できる余裕を含めて 128 KiB に制限する。
+/// draft-ietf-moq-transport-21 の制御メッセージ長は u16 で表現されるため、
+/// 1 メッセージの本文は最大 65535 バイトになる。未完成のメッセージを保持しても
+/// 状態機械へ渡すのは完成したメッセージだけであり、この上限を超えるのは
+/// peer が壊れたストリームを送り続けている場合に限られる。
 const MAX_CONTROL_BUFFER_BYTES: usize = 128 * 1024;
+
+/// `buf` の先頭から vi64 をデコードし `(値, 消費バイト数)` を返す。
+///
+/// 制御ストリーム先頭の stream type は vi64 である
+/// (draft-ietf-moq-transport-21 §6.4.1 (Unidirectional Streams))。
+/// バイト列が途中で切れている場合は `None` を返し、続きの到着を待つ。
+fn decode_varint_prefix(buf: &[u8]) -> Result<Option<(u64, usize)>, MessageError> {
+    match varint::decode(buf) {
+        Ok((value, consumed)) => Ok(Some((value, consumed))),
+        Err(MessageError::UnexpectedEof) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `buf` の先頭から完成した制御メッセージを 1 件デコードし `(メッセージ, 消費バイト数)` を返す。
+///
+/// 制御メッセージは Type (vi64) + Length (u16 big-endian) + Message Body で構成される
+/// (draft-ietf-moq-transport-21 §9 (Control Messages))。Type と Length を先に読み、
+/// 本文全体が揃っている場合だけ `ControlMessage::decode` へ渡す。揃っていない場合は
+/// `None` を返し、続きの到着を待つ。
+fn decode_control_message(buf: &[u8]) -> Result<Option<(ControlMessage, usize)>, MessageError> {
+    let Some((_, type_len)) = decode_varint_prefix(buf)? else {
+        return Ok(None);
+    };
+    if buf.len() < type_len + 2 {
+        return Ok(None);
+    }
+    let body_len = (usize::from(buf[type_len]) << 8) | usize::from(buf[type_len + 1]);
+    if buf.len() < type_len + 2 + body_len {
+        return Ok(None);
+    }
+
+    let (message, consumed) = ControlMessage::decode(buf)?;
+    Ok(Some((message, consumed)))
+}
 
 /// Sans I/O facade が Python 側へ返すイベント。
 #[pyclass(name = "_CoreEvent", frozen)]
@@ -85,7 +126,12 @@ impl CoreEvent {
 #[pyclass(name = "_CoreSession")]
 pub(crate) struct CoreSession {
     session: Session,
-    control_decoder: MessageDecoder,
+    /// peer 制御ストリームから受信済みで、まだデコードできていないバイト列。
+    ///
+    /// MoQT の制御ストリームは stream type varint に続けて制御メッセージが並ぶ。
+    /// WebTransport の受信 fragment 境界はメッセージ境界と一致しないため、
+    /// 完成したメッセージだけを取り出せるまでここへ蓄積する。
+    control_buffer: Vec<u8>,
     peer_control_stream_type_received: bool,
     started: bool,
     established: bool,
@@ -106,9 +152,9 @@ impl CoreSession {
 
         let mut options = SetupOptions::new();
         options.push(SetupOption {
-            // draft-ietf-moq-transport-19 §10.3.1.5 (MOQT_IMPLEMENTATION)。
+            // draft-ietf-moq-transport-21 §9.1.5 (MOQT_IMPLEMENTATION)。
             // draft 由来の値であり、将来の改訂で変更される可能性がある。
-            option_type: 0x07,
+            option_type: SETUP_OPTION_MOQT_IMPLEMENTATION,
             value: SetupOptionValue::Bytes(implementation.as_bytes().to_vec()),
         });
 
@@ -121,7 +167,7 @@ impl CoreSession {
 
         Ok(Self {
             session,
-            control_decoder: MessageDecoder::new(),
+            control_buffer: Vec::new(),
             peer_control_stream_type_received: false,
             started: false,
             established: false,
@@ -201,8 +247,9 @@ impl CoreSession {
             return Err(PyRuntimeError::new_err("session has not started"));
         }
 
-        let buffered_len = self.control_decoder.buffered_len();
-        let next_len = buffered_len
+        let next_len = self
+            .control_buffer
+            .len()
             .checked_add(data.len())
             .ok_or_else(|| PyValueError::new_err("control stream buffer length overflow"))?;
         if next_len > MAX_CONTROL_BUFFER_BYTES {
@@ -210,27 +257,25 @@ impl CoreSession {
                 "control stream buffer is too large: expected at most {MAX_CONTROL_BUFFER_BYTES} bytes, got {next_len} bytes"
             )));
         }
-        self.control_decoder.push(data);
+        self.control_buffer.extend_from_slice(data);
 
         if !self.peer_control_stream_type_received {
-            let Some(stream_type) = self
-                .control_decoder
-                .try_decode_varint()
+            let Some((stream_type, consumed)) = decode_varint_prefix(&self.control_buffer)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             else {
                 return Ok(Vec::new());
             };
+            self.control_buffer.drain(..consumed);
             self.session
                 .recv_control_stream_type(stream_type)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             self.peer_control_stream_type_received = true;
         }
 
-        while let Some(message) = self
-            .control_decoder
-            .try_decode_message()
+        while let Some((message, consumed)) = decode_control_message(&self.control_buffer)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
         {
+            self.control_buffer.drain(..consumed);
             self.session
                 .recv_control(message)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
