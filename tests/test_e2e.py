@@ -1,12 +1,13 @@
 """webtransport-py と moqt-rs を接続する実通信テスト。"""
 
+import asyncio
 import importlib
 import importlib.util
 import logging
 
 import pytest
 from moqt import moqt
-from moqt.moq import Client, Fetch, MoqtObject, Server, Subscription
+from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, Subscription
 from moqt.moq._runtime import MoqtError
 from moqt.moq.server import FetchRequest, Publication, SubscriptionRequest
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
@@ -104,6 +105,50 @@ async def test_subscribe_and_receive_objects_over_subgroup(moq_pair: MoqPair) ->
     assert [item.group_id for item in received] == [3, 3]
     assert [item.object_id for item in received] == [0, 1]
     assert [item.payload for item in received] == [b"first", b"second"]
+
+
+async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> None:
+    """
+    server の GOAWAY が client へ通知されることを確認する。
+
+    受信した GOAWAY は `Client.peer_goaway` と `Client.on_goaway` の両方から
+    参照できる。移行先が通知された場合はアプリが新しいセッションへ接続し直す。
+    """
+    received: list[PeerGoaway] = []
+
+    async def on_goaway(info: PeerGoaway) -> None:
+        received.append(info)
+
+    moq_pair.client.on_goaway(on_goaway)
+    await moq_pair.session.goaway(timeout=0)
+
+    await wait_until(lambda: bool(received))
+    assert received[0].timeout == 0
+    assert moq_pair.client.peer_goaway is not None
+
+
+async def test_request_update_is_accepted_by_the_peer(moq_pair: MoqPair) -> None:
+    """
+    REQUEST_UPDATE に peer が REQUEST_OK で応答することを確認する。
+
+    購読の sender である client が同じ request stream へ REQUEST_UPDATE を書き、
+    server が応答する。応答を待たずに戻る実装ではこのテストがタイムアウトする。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # FORWARD (varint) を付けた更新を送り、応答が返ることを確認する
+    await asyncio.wait_for(
+        subscription.request_update({moqt.PARAM_FORWARD: 1}),
+        timeout=OBJECT_TIMEOUT,
+    )
 
 
 async def test_object_published_right_after_subscribe_ok_is_delivered(moq_pair: MoqPair) -> None:

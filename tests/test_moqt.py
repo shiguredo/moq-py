@@ -494,6 +494,26 @@ def test_peer_request_rejects_track_status() -> None:
         server.receive_request_stream(4, _message_data(events[0]), "peer")
 
 
+def test_request_update_uses_a_separate_request_id() -> None:
+    """REQUEST_UPDATE が購読とは別の Request ID を消費することを確認する。
+
+    REQUEST_UPDATE の wire Request ID は対象 request のものと一致しない。対象 request
+    は同じ bidi stream 上で送ることで識別されるため、受信側はストリームに紐付けた
+    Request ID で解決しなければならない
+    (draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) / §9.5 (REQUEST_UPDATE))。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    updates = client.send_request_update(request_id, {})
+    assert [event.kind for event in updates] == ["send_on_stream"]
+
+    kinds = [
+        event.kind for event in server.receive_request_stream(4, _message_data(updates[0]), "peer")
+    ]
+    assert kinds == ["request_update"]
+
+
 def test_goaway() -> None:
     """GOAWAY の送受信を確認する。"""
     client, server = _setup()

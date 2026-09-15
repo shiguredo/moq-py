@@ -20,7 +20,7 @@ from moqt.moq._runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 # 保持すればよいため、通常は数件に収まる。上限に達するのは購読が成立しないまま
 # オブジェクトが届き続けている場合だけである。
 MAX_PENDING_OBJECTS_PER_ALIAS = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class PeerGoaway:
+    """peer から受信した GOAWAY。"""
+
+    new_session_uri: bytes
+    """移行先セッションの URI。空の場合は移行先が通知されていない。"""
+
+    timeout: int
+    """peer が待つ猶予時間 (ms)。0 の場合は即時の終了を求める。"""
 
 
 @dataclass(slots=True)
@@ -90,6 +101,17 @@ class Subscription:
         """subscription を終了する。"""
         if self._runtime is not None:
             await self._runtime.stop_sending(self.request_id)
+
+    async def request_update(self, parameters: dict[int, object] | None = None) -> None:
+        """REQUEST_UPDATE を送り、REQUEST_OK の受信を待つ。
+
+        購読の条件を更新する。REQUEST_UPDATE は同じ request stream に書ける
+        (draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE))。
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise MoqtError("subscription has no runtime")
+        await runtime.send_request_update(self.request_id, parameters)
 
     def _push(self, item: MoqtObject) -> None:
         """受信したオブジェクトをキューへ積む。"""
@@ -200,6 +222,16 @@ class Client:
         self._pending_objects: dict[int, list[MoqtObject]] = {}
         self._fetches: dict[int, Fetch] = {}
 
+        # アプリが登録するコールバック
+        self._publish_state_notify_callback: (
+            Callable[[dict[int, object]], Awaitable[None]] | None
+        ) = None
+        self._request_update_callback: (
+            Callable[[int, dict[int, object]], Awaitable[None]] | None
+        ) = None
+        self._goaway_callback: Callable[[PeerGoaway], Awaitable[None]] | None = None
+        self._peer_goaway: PeerGoaway | None = None
+
         # 受信データはすべてランタイムへ渡す
         self._transport.on_stream_data(self._on_stream_data)
         self._transport.on_stream_reset(self._on_stream_reset)
@@ -214,6 +246,41 @@ class Client:
         """MoQT SETUP 交換が完了しているかを返す。"""
         runtime = self._runtime
         return runtime is not None and runtime.established
+
+    @property
+    def peer_goaway(self) -> PeerGoaway | None:
+        """peer から受信した GOAWAY。未受信の場合は `None`。"""
+        return self._peer_goaway
+
+    def on_publish_state_notify(
+        self,
+        callback: Callable[[dict[int, object]], Awaitable[None]],
+    ) -> None:
+        """PUBLISH_STATE_NOTIFY を受信したときに呼ぶコールバックを登録する。
+
+        状態機械が購読の状態へ反映済みであり、応答は不要である
+        (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
+        """
+        self._publish_state_notify_callback = callback
+
+    def on_request_update(
+        self,
+        callback: Callable[[int, dict[int, object]], Awaitable[None]],
+    ) -> None:
+        """REQUEST_UPDATE を受信したときに呼ぶコールバックを登録する。
+
+        コールバックが例外を送出すると REQUEST_ERROR で拒否し、それ以外は
+        REQUEST_OK で受け入れる。応答はランタイムが送る。
+        """
+        self._request_update_callback = callback
+
+    def on_goaway(self, callback: Callable[[PeerGoaway], Awaitable[None]]) -> None:
+        """GOAWAY を受信したときに呼ぶコールバックを登録する。
+
+        GOAWAY の受信後は状態機械が新規 request の送信を拒否する。移行先が
+        通知された場合は、アプリが新しいセッションへ接続し直す。
+        """
+        self._goaway_callback = callback
 
     async def connect(self, timeout: float = 10.0) -> None:
         """WebTransport へ接続し、MoQT SETUP 交換の完了を待つ。"""
@@ -419,6 +486,9 @@ class Client:
             on_fetch_end=self._on_fetch_end,
             on_request_terminated=self._on_request_terminated,
             on_publish_done=self._on_publish_done,
+            on_publish_state_notify=self._on_publish_state_notify,
+            on_request_update=self._on_request_update,
+            on_goaway=self._on_goaway,
         )
 
     async def _on_established(self) -> None:
@@ -496,8 +566,47 @@ class Client:
         if subscription is not None:
             subscription._finish()
 
+    async def _on_publish_state_notify(self, event: NativeEvent) -> None:
+        """peer からの PUBLISH_STATE_NOTIFY をアプリへ通知する。"""
+        callback = self._publish_state_notify_callback
+        if callback is not None:
+            await callback(event.parameters or {})
+
+    async def _on_request_update(self, event: NativeEvent) -> None:
+        """peer からの REQUEST_UPDATE をアプリへ通知する。
+
+        応答 (REQUEST_OK) はランタイムが送る。アプリが例外を送出した場合だけ
+        REQUEST_ERROR で拒否される。
+        """
+        callback = self._request_update_callback
+        if callback is not None:
+            await callback(event.request_id or 0, event.parameters or {})
+
+    async def _on_goaway(self, event: NativeEvent) -> None:
+        """peer からの GOAWAY をアプリへ通知する。
+
+        状態機械は GOAWAY 受信後の新規 request 送信を拒否する
+        (moqt-rs の `SendRequestError::PeerGoawayReceived`)。移行先が通知された
+        場合はアプリが新しいセッションへ接続し直す。
+        """
+        body = event.message or {}
+        new_session_uri = body.get("new_session_uri")
+        timeout = body.get("timeout")
+        peer_goaway = PeerGoaway(
+            new_session_uri=new_session_uri if isinstance(new_session_uri, bytes) else b"",
+            timeout=timeout if isinstance(timeout, int) else 0,
+        )
+        self._peer_goaway = peer_goaway
+        callback = self._goaway_callback
+        if callback is not None:
+            await callback(peer_goaway)
+
     async def _on_task_error(self, error: BaseException) -> None:
-        self._fail_connect(error)
+        """アプリのコールバックの失敗を記録する。
+
+        セッション自体は壊れていないため、接続は閉じない。
+        """
+        logger.warning("MoQT callback failed: %s", error)
 
     async def _tick_loop(self) -> None:
         """セッションのタイムアウト判定を定期的に実行する。"""

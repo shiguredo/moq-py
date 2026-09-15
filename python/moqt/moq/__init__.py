@@ -22,6 +22,7 @@ from moqt.moq.client import (
     Client,
     Fetch,
     MoqtObject,
+    PeerGoaway,
     Subscription,
     TrackStatus,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "FetchRequest",
     "FetchResponse",
     "MoqtObject",
+    "PeerGoaway",
     "Publication",
     "Server",
     "ServerSession",

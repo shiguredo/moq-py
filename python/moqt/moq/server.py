@@ -33,10 +33,25 @@ ConnectionContext = tuple[tuple[str, int], int]
 
 @dataclass(frozen=True, slots=True)
 class ServerSession:
-    """確立した MoQT server session の識別情報。"""
+    """確立した MoQT server session。"""
 
     session_id: int
+    """WebTransport session の ID。"""
+
     address: tuple[str, int]
+    """peer のアドレス。"""
+
+    runtime: Runtime
+    """この session のランタイム。"""
+
+    async def goaway(self, timeout: int = 0) -> None:
+        """GOAWAY を送り、セッションの終了を予告する。
+
+        `timeout` は peer が残りの request を終えるまで待つ猶予時間 (ms) である。
+        GOAWAY の送信後、peer は新しい request を開始しない
+        (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+        """
+        await self.runtime.send_goaway(timeout)
 
 
 @dataclass(slots=True)
@@ -285,6 +300,9 @@ class Server:
         self._on_session_established: Callable[[ServerSession], Awaitable[None]] | None = None
         self._on_subscribe: Callable[[SubscriptionRequest], Awaitable[None]] | None = None
         self._on_fetch: Callable[[FetchRequest], Awaitable[None]] | None = None
+        self._request_update_callback: (
+            Callable[[Runtime, int, dict[int, object]], Awaitable[None]] | None
+        ) = None
         self._tick_task: asyncio.Task[None] | None = None
 
         self._transport.on_session_ready(self._on_session_ready)
@@ -320,6 +338,21 @@ class Server:
     ) -> None:
         """peer から FETCH が届いたときに呼び出す非同期 callback を設定する。"""
         self._on_fetch = callback
+
+    def on_request_update(
+        self,
+        callback: Callable[[Runtime, int, dict[int, object]], Awaitable[None]],
+    ) -> None:
+        """peer から REQUEST_UPDATE が届いたときに呼び出す非同期 callback を設定する。
+
+        引数はランタイム、request の Request ID、受信パラメータである。コールバックが
+        例外を送出すると REQUEST_ERROR で拒否し、それ以外は REQUEST_OK で受け入れる。
+        応答はランタイムが送る。未登録の場合は受け入れる。
+
+        request の所有者はランタイムが識別済みである。PUBLISH の応答を返したい場合は
+        コールバックで `runtime.send_request_ok(request_id)` を呼ぶ。
+        """
+        self._request_update_callback = callback
 
     async def start(self) -> None:
         """WebTransport server を開始する。"""
@@ -391,13 +424,37 @@ class Server:
         return RuntimeEvents(
             on_established=lambda: self._on_established(context),
             on_request=lambda event: self._on_request(context, event),
+            on_request_update=lambda event: self._on_request_update(context, event),
         )
+
+    async def _on_request_update(self, context: ConnectionContext, event: NativeEvent) -> None:
+        """peer からの REQUEST_UPDATE をアプリへ通知する。
+
+        応答 (REQUEST_OK) はランタイムが送る。アプリが例外を送出した場合だけ
+        REQUEST_ERROR で拒否される。コールバックが未登録の場合は受け入れる。
+        """
+        callback = self._request_update_callback
+        if callback is None:
+            return
+        connection = self._connection(context)
+        if connection is None:
+            return
+        await callback(connection.runtime, event.request_id or 0, event.parameters or {})
 
     async def _on_established(self, context: ConnectionContext) -> None:
         """SETUP 完了をアプリケーションへ通知する。"""
         address, session_id = context
+        connection = self._connection(context)
+        if connection is None:
+            return
         if self._on_session_established is not None:
-            await self._on_session_established(ServerSession(session_id, address))
+            await self._on_session_established(
+                ServerSession(
+                    session_id=session_id,
+                    address=address,
+                    runtime=connection.runtime,
+                )
+            )
 
     def _connection(self, context: ConnectionContext) -> _Connection | None:
         """コールバックの context から接続を引く。"""

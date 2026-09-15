@@ -1444,14 +1444,23 @@ impl CoreSession {
             match role {
                 "peer" => {
                     if self.request_streams.contains_key(&stream_id) {
-                        // 2 通目以降は既存 request へのメッセージとして処理する
-                        let request_id = message_request_id(&message).ok_or_else(|| {
-                            PyValueError::new_err(format!(
-                                "request stream {stream_id} carries a message without a request id"
-                            ))
-                        })?;
+                        // 2 通目以降は既存 request へのメッセージとして処理する。
+                        //
+                        // REQUEST_UPDATE は独立した Request ID を消費するため、wire の
+                        // Request ID は対象 request のものと一致しない。対象 request は
+                        // 「同じ bidi stream 上で送る」ことで識別されるため、ストリームに
+                        // 紐付けた Request ID を状態機械へ渡す
+                        // (draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) / §9.5 (REQUEST_UPDATE))。
+                        let stream_request_id = match self.request_streams.get(&stream_id) {
+                            Some(RequestStreamRole::Peer { request_id }) => *request_id,
+                            _ => message_request_id(&message).ok_or_else(|| {
+                                PyValueError::new_err(format!(
+                                    "request stream {stream_id} carries a message without a request id"
+                                ))
+                            })?,
+                        };
                         self.session
-                            .recv_stream_message(request_id, message)
+                            .recv_stream_message(stream_request_id, message)
                             .map_err(runtime_error)?;
                     } else {
                         // 最初のメッセージは状態機械がイベントを発行しないため、

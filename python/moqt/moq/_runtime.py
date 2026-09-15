@@ -184,6 +184,7 @@ class RuntimeEvents:
     on_request_terminated: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_request_update: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_publish_done: Callable[[NativeEvent], Awaitable[None]] | None = None
+    on_publish_state_notify: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_goaway: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_object: Callable[[int, NativeEvent, bytes], Awaitable[None]] | None = None
     on_fetch_end: Callable[[str, NativeEvent], Awaitable[None]] | None = None
@@ -220,6 +221,7 @@ class RuntimeEvents:
             on_request_terminated=wrap(self.on_request_terminated),
             on_request_update=wrap(self.on_request_update),
             on_publish_done=wrap(self.on_publish_done),
+            on_publish_state_notify=wrap(self.on_publish_state_notify),
             on_goaway=wrap(self.on_goaway),
             on_object=wrap(self.on_object),
             on_fetch_end=wrap(self.on_fetch_end),
@@ -481,6 +483,26 @@ class Runtime:
                 list(namespace), track_name, dict(parameters or {})
             )
         )
+
+    async def send_request_update(
+        self,
+        request_id: int,
+        parameters: dict[int, object] | None = None,
+    ) -> None:
+        """REQUEST_UPDATE を送信し、REQUEST_OK の受信を待つ。
+
+        応答は同じ request stream で届くため、待ち合わせには `_start_request` を
+        使えない (Request ID は状態機械が採番済みである)。
+        """
+        pending = _PendingRequest()
+        self._pending_requests[request_id] = pending
+        try:
+            await self._apply_events(
+                self._core.send_request_update(request_id, dict(parameters or {}))
+            )
+            await pending.future
+        finally:
+            self._pending_requests.pop(request_id, None)
 
     async def send_publish_state_notify(
         self,
@@ -981,9 +1003,17 @@ class Runtime:
         elif kind == "request_terminated":
             await self._notify(self._events.on_request_terminated, event)
         elif kind == "request_update":
-            await self._notify(self._events.on_request_update, event)
+            # peer からの REQUEST_UPDATE には応答が必須である
+            # (draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE))。
+            # アプリのコールバックを先に呼び、例外を送出した場合は REQUEST_ERROR で拒否する
+            await self._respond_request_update(event)
         elif kind == "publish_done":
             await self._notify(self._events.on_publish_done, event)
+        elif kind == "publish_state_notify":
+            # 状態機械が購読の状態へ反映済みであり、応答は不要である
+            # (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
+            # アプリが通知を観測できるようにする
+            await self._notify(self._events.on_publish_state_notify, event)
         elif kind == "goaway":
             await self._notify(self._events.on_goaway, event)
         elif kind in {
@@ -996,7 +1026,34 @@ class Runtime:
             self._remember_incoming_request(event)
             await self._notify(self._events.on_request, event)
         else:
-            logger.debug("unhandled MoQT event: %s", kind)
+            logger.warning("unhandled MoQT event: %s", kind)
+
+    async def _respond_request_update(self, event: NativeEvent) -> None:
+        """受信した REQUEST_UPDATE へ応答する。
+
+        アプリのコールバックが例外を送出した場合は REQUEST_ERROR で拒否する。
+        それ以外はパラメータを付けずに REQUEST_OK で受け入れる。
+
+        REQUEST_UPDATE_OK で許可されるパラメータは EXPIRES と LARGEST_OBJECT だけ
+        である (moqt-rs の `REQUEST_UPDATE_OK_ALLOWED_PARAMS`)。
+        """
+        request_id = event.request_id
+        if request_id is None:
+            logger.warning("REQUEST_UPDATE without a request id was ignored")
+            return
+        callback = self._events.on_request_update
+        if callback is not None:
+            # 拒否の意思表示はコールバックの例外で表す。_notify は例外を握り潰すため
+            # ここでは直接呼び出す
+            try:
+                await callback(event)
+            except Exception:
+                logger.exception("the application rejected a REQUEST_UPDATE")
+                await self.send_request_error(
+                    request_id, moqt.REQUEST_NOT_SUPPORTED, "update rejected"
+                )
+                return
+        await self.send_request_ok(request_id)
 
     def _remember_incoming_request(self, event: NativeEvent) -> None:
         """peer から届いた request のストリームを Request ID から引けるようにする。"""
