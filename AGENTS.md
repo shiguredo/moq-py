@@ -19,6 +19,7 @@
 ## リポジトリ固有の設定について
 
 - リポジトリ固有の規約・設定がある場合は `CODEBASE.md` を参照すること
+- 運用方針が競合する場合は `CODEBASE.md` の現在の運用方針を優先すること
 
 ## 機密情報について
 
@@ -27,6 +28,8 @@
 ## Git について
 
 - git 操作を行うときは `shiguredo-git` スキルを参照すること
+- ブランチと Pull-Request の扱いは `CODEBASE.md` の現在の運用方針に従うこと
+  - `shiguredo-git` スキルの Git Flow とブランチ命名規則は適用しない
 
 ## issues について
 
@@ -34,7 +37,8 @@
 
 ## GitHub Actions について
 
-- GitHub Actions を作成・変更・レビューするときは `shiguredo-github-actions` スキルを参照すること
+- 現在は対応しない。`CODEBASE.md` の現在の運用方針に従うこと
+  - 対応を再開するときは `shiguredo-github-actions` スキルを参照すること
 
 ## 言語について
 
@@ -45,4 +49,5 @@
 
 ## 変更履歴について
 
-- 変更履歴を記載するときは `shiguredo-changelog` スキルを参照すること
+- 現在は `CHANGES.md` に残さない。`CODEBASE.md` の現在の運用方針に従うこと
+  - 記載を再開するときは `shiguredo-changelog` スキルを参照すること
