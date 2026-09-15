@@ -39,6 +39,27 @@ async def _take_objects(subscription: Subscription, count: int) -> list[MoqtObje
     return await collect_objects(subscription.objects(), count, OBJECT_TIMEOUT)
 
 
+async def _take_objects_in_group(
+    subscription: Subscription,
+    group_id: int,
+    limit: int = 4,
+) -> list[MoqtObject]:
+    """指定した Group ID のオブジェクトが届くまで取り出す。
+
+    reset と競合したオブジェクトは破棄されることもあれば届くこともある
+    (RESET_STREAM は送信側の操作であり、到着済みのデータは取り消せない)。
+    reset の後に送ったオブジェクトが届いたことを確かめるために使う。
+    """
+    collected: list[MoqtObject] = []
+    async for item in subscription.objects():
+        collected.append(item)
+        if item.group_id == group_id:
+            return collected
+        if len(collected) >= limit:
+            break
+    return collected
+
+
 async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
     """fetch から指定件数のオブジェクトを取り出す。"""
     return await collect_objects(fetch.objects(), count, OBJECT_TIMEOUT)
@@ -659,3 +680,66 @@ def test_legacy_moq_package_is_not_installed() -> None:
     取りこぼしである。
     """
     assert importlib.util.find_spec("moq") is None
+
+
+async def test_reset_subgroup_allows_a_new_subgroup_on_the_same_track(
+    moq_pair: MoqPair,
+) -> None:
+    """
+    subgroup を reset した後も同じ Track で配信を続けられることを確認する。
+
+    reset は送信済みのデータを破棄し
+    (draft-ietf-moq-transport-21 §16.11.4 (Stream Reset Codes))、次のオブジェクトは
+    新しい subgroup ストリームで送る。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # オブジェクトを送ってから同じ subgroup を reset する
+    publication = published[0]
+    await publication.send_object(1, 0, b"discarded")
+    await publication.reset_subgroup(moqt.STREAM_CANCELLED)
+
+    # reset の後は同じ Request ID で新しい subgroup を開ける
+    await publication.send_object(2, 0, b"kept")
+
+    received = await _take_objects_in_group(subscription, 2)
+
+    assert [item.payload for item in received if item.group_id == 2] == [b"kept"]
+
+
+async def test_reset_subgroup_at_keeps_the_connection_usable(moq_pair: MoqPair) -> None:
+    """
+    RESET_STREAM_AT で subgroup を reset してもセッションが壊れないことを確認する。
+
+    先頭 `reliable_size` バイトは peer へ届き、残りは破棄される
+    (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+    どのバイトまで届くかはトランスポートの実装に依存するため、ここでは API が
+    受理され、その後の配信が続くことだけを確認する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    publication = published[0]
+    await publication.send_object(1, 0, b"partial")
+    # stream type の 1 バイトと subgroup ヘッダの 3 バイトだけを確実に届ける
+    await publication.reset_subgroup_at(4, moqt.STREAM_CANCELLED)
+    await publication.send_object(2, 0, b"kept")
+
+    received = await _take_objects_in_group(subscription, 2)
+
+    assert [item.payload for item in received if item.group_id == 2] == [b"kept"]

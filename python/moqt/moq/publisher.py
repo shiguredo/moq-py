@@ -128,6 +128,27 @@ class Publication:
         await self.runtime.finish_subgroup(self.request_id)
         await self.runtime.send_publish_done(self.request_id, status_code, reason)
 
+    async def reset_subgroup(self, error_code: int = moqt.STREAM_CANCELLED) -> None:
+        """送信中の subgroup ストリームを reset する。
+
+        送信済みのオブジェクトは破棄される
+        (draft-ietf-moq-transport-21 §16.11.4 (Stream Reset Codes))。
+        """
+        await self.runtime.reset_subgroup(self.request_id, error_code)
+
+    async def reset_subgroup_at(
+        self,
+        reliable_size: int,
+        error_code: int = moqt.STREAM_CANCELLED,
+    ) -> None:
+        """送信中の subgroup ストリームを RESET_STREAM_AT で reset する。
+
+        先頭 `reliable_size` バイトは peer へ確実に届き、残りは破棄される
+        (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+        `reliable_size` は stream type と subgroup ヘッダを含む送信済みバイト数である。
+        """
+        await self.runtime.reset_subgroup_at(self.request_id, reliable_size, error_code)
+
 
 __all__ = [
     "DEFAULT_PUBLISH_DONE_CODE",

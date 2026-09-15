@@ -2510,15 +2510,32 @@ impl CoreSession {
     }
 
     /// 送信済みのデータストリームを reset する。
+    ///
+    /// `reliable_size` を渡すと RESET_STREAM_AT になり、先頭 `reliable_size` バイトは
+    /// peer へ確実に届ける (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+    /// 省略した場合は RESET_STREAM になり、未達のデータは破棄される。
+    #[pyo3(signature = (stream_id, error_code, reliable_size=None))]
     fn reset_outgoing_data_stream(
         &mut self,
         py: Python<'_>,
         stream_id: u64,
         error_code: u64,
+        reliable_size: Option<u64>,
     ) -> PyResult<Vec<CoreEvent>> {
-        self.session
-            .reset_outgoing_data_stream_with_code(DataStreamId(stream_id), error_code)
-            .map_err(runtime_error)?;
+        match reliable_size {
+            Some(reliable_size) => self
+                .session
+                .reset_outgoing_data_stream_at_with_code(
+                    DataStreamId(stream_id),
+                    reliable_size,
+                    Some(error_code),
+                )
+                .map_err(runtime_error)?,
+            None => self
+                .session
+                .reset_outgoing_data_stream_with_code(DataStreamId(stream_id), error_code)
+                .map_err(runtime_error)?,
+        }
         self.drain_events(py)
     }
 

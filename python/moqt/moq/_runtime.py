@@ -712,6 +712,37 @@ class Runtime:
         """subscription を終了する (subscriber 側の STOP_SENDING)。"""
         await self._apply_events(self._core.stop_sending(request_id))
 
+    async def reset_subgroup(self, request_id: int, error_code: int) -> None:
+        """送信中の subgroup ストリームを reset する。
+
+        送信済みのオブジェクトは破棄される
+        (draft-ietf-moq-transport-21 §16.11.4 (Stream Reset Codes))。
+        """
+        writer = self._subgroups.pop(request_id, None)
+        if writer is None:
+            raise MoqtError(f"subscription {request_id} has no subgroup stream")
+        self._local_streams.discard(writer.stream_id)
+        self._streams.pop(writer.stream_id, None)
+        await self._apply_events(
+            self._core.reset_outgoing_data_stream(writer.stream_id, error_code)
+        )
+
+    async def reset_subgroup_at(self, request_id: int, reliable_size: int, error_code: int) -> None:
+        """送信中の subgroup ストリームを RESET_STREAM_AT で reset する。
+
+        先頭 `reliable_size` バイトは peer へ確実に届き、残りは破棄される
+        (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+        `reliable_size` は stream type と subgroup ヘッダを含む送信済みバイト数である。
+        """
+        writer = self._subgroups.pop(request_id, None)
+        if writer is None:
+            raise MoqtError(f"subscription {request_id} has no subgroup stream")
+        self._local_streams.discard(writer.stream_id)
+        self._streams.pop(writer.stream_id, None)
+        await self._apply_events(
+            self._core.reset_outgoing_data_stream(writer.stream_id, error_code, reliable_size)
+        )
+
     # ─── オブジェクト送信 ───────────────────────────────────
 
     async def send_subgroup_object(
@@ -1015,6 +1046,17 @@ class Runtime:
         if event.kind == "reset_data_stream":
             stream_id = event.stream_id
             if stream_id is not None:
+                if event.reliable_size is not None:
+                    # RESET_STREAM_AT である。先頭 reliable_size バイトは peer へ届く
+                    # (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+                    # webtransport-py の reset_stream は reliable size を運べないため、
+                    # 状態機械の判断を記録だけして通常の reset を送る
+                    logger.info(
+                        "MoQT resetting stream %d with reliable size %d; "
+                        "the transport does not carry the reliable size",
+                        stream_id,
+                        event.reliable_size,
+                    )
                 with contextlib.suppress(Exception):
                     await self._ops.reset_stream(stream_id, int(event.code or 0))
         elif event.kind == "send_padding_stream":

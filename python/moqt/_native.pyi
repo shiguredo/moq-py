@@ -682,9 +682,13 @@ class Session:
         """
         オブジェクトの受信途中でストリームが終端したことを通知する。
         """
-    def reset_outgoing_data_stream(self, /, stream_id: int, error_code: int) -> list[Event]:
+    def reset_outgoing_data_stream(self, /, stream_id: int, error_code: int, reliable_size: int |None = None) -> list[Event]:
         """
         送信済みのデータストリームを reset する。
+
+        `reliable_size` を渡すと RESET_STREAM_AT になり、先頭 `reliable_size` バイトは
+        peer へ確実に届ける (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+        省略した場合は RESET_STREAM になり、未達のデータは破棄される。
         """
     def role(self, /) -> str:
         """
