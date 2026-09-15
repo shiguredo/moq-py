@@ -702,3 +702,49 @@ def test_setup_option_types_are_drafted_values() -> None:
     assert moqt.SETUP_OPTION_MAX_FILTER_RANGES == 0x06
     assert moqt.SETUP_OPTION_MOQT_IMPLEMENTATION == 0x07
     assert moqt.SETUP_OPTION_MAX_REQUEST_UPDATES == 0x08
+
+
+# ─── パラメータのデコード ───────────────────────────────────
+
+
+def test_decode_parameter_reads_varint_values() -> None:
+    """偶数型のパラメータを varint としてデコードすることを確認する。
+
+    (draft-ietf-moq-transport-21 §9.20.6 (SUBSCRIBER_PRIORITY Parameter))
+    """
+    assert moqt.decode_parameter(moqt.PARAM_SUBSCRIBER_PRIORITY, encode_varint(128)) == 128
+
+
+def test_decode_parameter_reads_uint8_values() -> None:
+    """uint8 で表現するパラメータを `int` としてデコードすることを確認する。
+
+    FORWARD と GROUP_ORDER は uint8 である
+    (draft-ietf-moq-transport-21 §9.20.7 (FORWARD Parameter))。
+    """
+    assert moqt.decode_parameter(moqt.PARAM_FORWARD, b"\x01") == 1
+
+
+def test_decode_parameter_reads_a_location() -> None:
+    """LARGEST_OBJECT を `(Group ID, Object ID)` としてデコードすることを確認する。
+
+    (draft-ietf-moq-transport-21 §9.20.5 (LARGEST_OBJECT Parameter))
+    """
+    value = encode_varint(3) + encode_varint(7)
+
+    assert moqt.decode_parameter(moqt.PARAM_LARGEST_OBJECT, value) == (3, 7)
+
+
+def test_decode_parameter_reads_a_track_namespace_prefix() -> None:
+    """TRACK_NAMESPACE_PREFIX を namespace のフィールド列としてデコードすることを確認する。
+
+    (draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter))
+    """
+    value = b"\x01\x02ns"
+
+    assert moqt.decode_parameter(moqt.PARAM_TRACK_NAMESPACE_PREFIX, value) == [b"ns"]
+
+
+def test_decode_parameter_rejects_a_malformed_value() -> None:
+    """型に合わない値のバイト列を拒否することを確認する。"""
+    with pytest.raises(ValueError, match="unexpected end of buffer"):
+        moqt.decode_parameter(moqt.PARAM_LOCATION_FILTER, b"\xff")

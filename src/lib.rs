@@ -72,8 +72,8 @@ mod _native {
     // MoQT のプロトコル層 (moqt.moqt)
     #[pymodule_export]
     use crate::codec::{
-        Message, classify_data_stream_type, decode_message, decode_varint, decode_varint_prefix,
-        encode_varint, is_padding_datagram, setup_stream_type,
+        Message, classify_data_stream_type, decode_message, decode_parameter, decode_varint,
+        decode_varint_prefix, encode_varint, is_padding_datagram, setup_stream_type,
     };
     #[pymodule_export]
     use crate::core::{CoreEvent, CoreSession};

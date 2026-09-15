@@ -21,7 +21,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
-use crate::errors::runtime_error;
+use crate::errors::{codec_error, runtime_error};
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::message::common::{Location, TrackNamespace};
@@ -281,7 +281,8 @@ fn encode_parameter_value(parameter: &MessageParameter) -> Vec<u8> {
     if parameters.encode(&mut buf).is_err() {
         return Vec::new();
     }
-    // 先頭はパラメータ数 (vi64)、続いて型 (vi64) である
+    // 先頭はパラメータ数 (vi64)、続いて KVP の delta key (vi64) である。
+    // パラメータ 1 件だけのリストでは delta key は 0 になる
     let mut offset = 0;
     for _ in 0..2 {
         match varint::decode(&buf[offset..]) {
@@ -339,6 +340,85 @@ pub(crate) fn track_namespace_to_python(
         fields.append(PyBytes::new(py, field))?;
     }
     Ok(fields.unbind())
+}
+
+/// パラメータ 1 件を Python 側の値へ変換する。
+///
+/// `value` はパラメータの値部分だけのバイト列である。型と値形式の対応は
+/// パラメータ型ごとに決まっているため、型を付けた 1 件のリストとしてデコードする。
+/// (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
+pub(crate) fn decode_parameter_to_python(
+    py: Python<'_>,
+    param_type: u64,
+    value: &[u8],
+) -> PyResult<Py<PyAny>> {
+    // パラメータ 1 件だけのリストを組み立てる。KVP の型は直前の型との差分であり、
+    // 先頭の直前の型は 0 である (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))
+    let mut buf = Vec::new();
+    varint::encode(1, &mut buf);
+    varint::encode(param_type, &mut buf);
+    buf.extend_from_slice(value);
+    let (parameters, _consumed) = MessageParameters::decode(&buf).map_err(codec_error)?;
+    let parameter = parameters
+        .as_slice()
+        .first()
+        .ok_or_else(|| PyValueError::new_err("parameter could not be decoded"))?;
+    parameter_value_to_python(py, &parameter.value)
+}
+
+/// パラメータの値を Python 側の値へ変換する。
+///
+/// `MessageParameterValue` をそのまま解釈した結果を返す。アプリは
+/// `Event.parameters` の生バイトをこの関数で解釈する。
+pub(crate) fn parameter_value_to_python(
+    py: Python<'_>,
+    value: &MessageParameterValue,
+) -> PyResult<Py<PyAny>> {
+    match value {
+        MessageParameterValue::VarInt(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        MessageParameterValue::Uint8(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        MessageParameterValue::LengthPrefixed(value) => {
+            Ok(PyBytes::new(py, value).into_any().unbind())
+        }
+        MessageParameterValue::Location { group, object } => {
+            Ok((*group, *object).into_pyobject(py)?.into_any().unbind())
+        }
+        MessageParameterValue::TrackNamespacePrefix(namespace) => {
+            Ok(track_namespace_to_python(py, namespace)?.into_any())
+        }
+        MessageParameterValue::AuthorizationToken(token) => {
+            let dict = PyDict::new(py);
+            let (kind, token_type, token_value) = match token {
+                AuthorizationToken::UseValue {
+                    token_type,
+                    token_value,
+                } => ("use_value", Some(*token_type), Some(token_value.as_slice())),
+                AuthorizationToken::UseAlias { alias } => ("use_alias", Some(*alias), None),
+                AuthorizationToken::Register {
+                    alias,
+                    token_type,
+                    token_value,
+                } => {
+                    let _ = alias;
+                    ("register", Some(*token_type), Some(token_value.as_slice()))
+                }
+                AuthorizationToken::Delete { alias } => ("delete", Some(*alias), None),
+            };
+            dict.set_item("kind", kind)?;
+            match token_type {
+                Some(value) => dict.set_item("token_type", value)?,
+                None => dict.set_item("token_type", py.None())?,
+            }
+            match token_value {
+                Some(value) => dict.set_item("token_value", PyBytes::new(py, value))?,
+                None => dict.set_item("token_value", py.None())?,
+            }
+            Ok(dict.into_any().unbind())
+        }
+        MessageParameterValue::FillParameters(parameters) => {
+            Ok(message_parameters_to_python(py, parameters)?.into_any())
+        }
+    }
 }
 
 /// メッセージ種別を表す文字列を返す。

@@ -16,8 +16,9 @@ use shiguredo_moqt::stream::{self, DataStreamType};
 use shiguredo_moqt::varint;
 
 use crate::core::{
-    control_message_length, decode_varint_prefix as decode_varint_prefix_inner,
-    message_body_to_python, message_kind, message_request_id,
+    control_message_length, decode_parameter_to_python,
+    decode_varint_prefix as decode_varint_prefix_inner, message_body_to_python, message_kind,
+    message_request_id,
 };
 use crate::errors::{codec_error, runtime_error};
 
@@ -189,6 +190,25 @@ pub(crate) fn decode_varint(data: &[u8]) -> PyResult<(u64, usize)> {
 #[pyfunction]
 pub(crate) fn decode_varint_prefix(data: &[u8]) -> PyResult<Option<(u64, usize)>> {
     decode_varint_prefix_inner(data).map_err(runtime_error)
+}
+
+/// パラメータの値部分をデコードして Python の値へ変換する。
+///
+/// `Event.parameters` と `Message.parameters` が返す辞書の値は、パラメータ 1 件分の
+/// エンコード済みバイト列である。この関数で型に応じた値へ解釈する。
+/// 偶数型は `int`、長さ付きバイト列は `bytes`、`LARGEST_OBJECT` は
+/// `(group_id, object_id)`、`AUTHORIZATION_TOKEN` は辞書、
+/// `FILL_PARAMETERS` は入れ子の辞書になる。
+///
+/// 解釈できないバイト列は `ValueError` になる。
+/// (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
+#[pyfunction]
+pub(crate) fn decode_parameter(
+    py: Python<'_>,
+    param_type: u64,
+    value: &[u8],
+) -> PyResult<Py<PyAny>> {
+    decode_parameter_to_python(py, param_type, value)
 }
 
 /// stream type の varint が制御ストリームかデータストリームかを判定する。

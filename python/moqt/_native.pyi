@@ -1019,6 +1019,20 @@ def decode_message(data: bytes) -> tuple[Message, int]:
     (draft-ietf-moq-transport-21 §9 (Control Messages))。
     """
 
+def decode_parameter(param_type: int, value: bytes) -> Any:
+    """
+    パラメータの値部分をデコードして Python の値へ変換する。
+
+    `Event.parameters` と `Message.parameters` が返す辞書の値は、パラメータ 1 件分の
+    エンコード済みバイト列である。この関数で型に応じた値へ解釈する。
+    偶数型は `int`、長さ付きバイト列は `bytes`、`LARGEST_OBJECT` は
+    `(group_id, object_id)`、`AUTHORIZATION_TOKEN` は辞書、
+    `FILL_PARAMETERS` は入れ子の辞書になる。
+
+    解釈できないバイト列は `ValueError` になる。
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
+    """
+
 def decode_varint(data: bytes) -> tuple[int, int]:
     """
     先頭の vi64 をデコードし `(値, 消費バイト数)` を返す。
