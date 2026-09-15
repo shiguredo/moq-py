@@ -42,7 +42,7 @@ hooks = [
 ]
 
 # tombi: TOML のフォーマッタ・リンタ
-# rev は prek auto-update で更新する
+# rev は prek update で更新する
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
 rev = "v1.5.5"
@@ -54,7 +54,7 @@ hooks = [
 
 # ruff: フォーマッタ・リンタ
 # ruff のバイナリはフックが自前で用意するため、pyproject.toml の依存には含めない
-# rev がそのまま ruff のバージョンになる。更新は prek auto-update で行う
+# rev がそのまま ruff のバージョンになる。更新は prek update で行う
 # 設定は pyproject.toml の [tool.ruff] を読む
 # ruff-format は Markdown 内の Python コードブロックも整形対象に含む
 [[repos]]
@@ -69,7 +69,7 @@ hooks = [
 
 # ty: 静的型チェッカ
 # ty のバイナリはフックが自前で用意するため、pyproject.toml の依存には含めない
-# rev がそのまま ty のバージョンになる。更新は prek auto-update で行う
+# rev がそのまま ty のバージョンになる。更新は prek update で行う
 # フックは uv check 経由で動き、pyproject.toml の依存を解決してから型検査する
 # 変更ファイルの有無に関わらず常にプロジェクト全体を検査する
 # 既定で uv.lock / .venv を作成・更新する。副作用を避けたい場合は args = ["--isolated"] を付ける
