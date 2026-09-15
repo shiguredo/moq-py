@@ -151,7 +151,7 @@ impl StreamBuffers {
 }
 
 /// Python 側から渡された Track Namespace をライブラリの型へ変換する。
-fn track_namespace_from_python(fields: Vec<Vec<u8>>) -> PyResult<TrackNamespace> {
+pub(crate) fn track_namespace_from_python(fields: Vec<Vec<u8>>) -> PyResult<TrackNamespace> {
     TrackNamespace::new(fields).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 

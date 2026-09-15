@@ -18,7 +18,11 @@ from moqt._native import (
     MediaTimeline,
     Uri,
     parse_fragment_pairs,
+    parse_msf_fragment,
+    parse_name,
     resolve_catalog_variables,
+    resolve_timeline_template,
+    serialize_name,
 )
 
 MSF_VERSION: str = _native.MSF_VERSION
@@ -36,5 +40,9 @@ __all__ = [
     "MediaTimeline",
     "Uri",
     "parse_fragment_pairs",
+    "parse_msf_fragment",
+    "parse_name",
     "resolve_catalog_variables",
+    "resolve_timeline_template",
+    "serialize_name",
 ]

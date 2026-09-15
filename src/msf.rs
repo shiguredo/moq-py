@@ -11,13 +11,14 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use shiguredo_moqt::msf::{
     self, MSF_CATALOG_TRACK_NAME, MSF_VERSION, MsfCatalog, MsfCatalogDocument, MsfDeltaUpdate,
     MsfEventIndex, MsfEventTimeline, MsfEventTimelineEntry, MsfMediaTimeline,
-    MsfMediaTimelineEntry, TimelineEncodingOptions, uri,
+    MsfMediaTimelineEntry, MsfTemplate, TimelineEncodingOptions, uri,
 };
+use shiguredo_moqt::name;
 
 use crate::core::track_namespace_to_python;
 use crate::errors::codec_error;
@@ -613,6 +614,98 @@ pub(crate) fn resolve_catalog_variables<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     let resolved = msf::resolve_catalog_variables(document, fragment).map_err(codec_error)?;
     Ok(PyBytes::new(py, &resolved))
+}
+
+/// MSF の media timeline template から n 番目のエントリを計算する
+/// (draft-ietf-moq-msf-01 §7.4.1)。
+///
+/// `template` は `Catalog.tracks` の `template` 配列である。値が負の整数または
+/// 配列でない場合は `ValueError` になる。計算が overflow する場合は `None` を返す。
+#[pyfunction]
+pub(crate) fn resolve_timeline_template(
+    template: &Bound<'_, PyList>,
+    n: u64,
+) -> PyResult<Option<(u64, u64, u64, u64)>> {
+    let template = msf_template_from_python(template)?;
+    Ok(template.resolve_entry(n).map(|entry| {
+        (
+            entry.pts_ms,
+            entry.group_id,
+            entry.object_id,
+            entry.wallclock_ms,
+        )
+    }))
+}
+
+/// Python の配列から `MsfTemplate` を構築する。
+///
+/// 配列は `[start_media_time, delta_media_time, [start_group_id, start_object_id],
+/// [delta_group_id, delta_object_id], start_wallclock, delta_wallclock]` である
+/// (draft-ietf-moq-msf-01 §7.4.1)。
+fn msf_template_from_python(items: &Bound<'_, PyList>) -> PyResult<MsfTemplate> {
+    if items.len() != 6 {
+        return Err(PyValueError::new_err(format!(
+            "media timeline template requires 6 elements, got {}",
+            items.len()
+        )));
+    }
+    // 入れ子の配列は `[Group ID, Object ID]` である。タプルへの extract は
+    // list を受け付けないため、要素ごとに取り出す
+    let start_group_id = items.get_item(2)?.get_item(0)?.extract()?;
+    let start_object_id = items.get_item(2)?.get_item(1)?.extract()?;
+    let delta_group_id = items.get_item(3)?.get_item(0)?.extract()?;
+    let delta_object_id = items.get_item(3)?.get_item(1)?.extract()?;
+    Ok(MsfTemplate {
+        start_media_time: items.get_item(0)?.extract()?,
+        delta_media_time: items.get_item(1)?.extract()?,
+        start_group_id,
+        start_object_id,
+        delta_group_id,
+        delta_object_id,
+        start_wallclock: items.get_item(4)?.extract()?,
+        delta_wallclock: items.get_item(5)?.extract()?,
+    })
+}
+
+/// `parse_msf_fragment` の返り値。namespace、Track 名、fragment パラメータである。
+type ParsedMsfFragment = (Py<PyAny>, Py<PyBytes>, Vec<(String, String)>);
+
+/// MSF fragment (`msf:` prefix 付き) を namespace と Track 名とパラメータへ分解する
+/// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))。
+///
+/// `Uri.parse` を通さない入力を扱う。返り値は
+/// `(namespace, track_name, [(名前, 値), ...])` である。
+#[pyfunction]
+pub(crate) fn parse_msf_fragment(py: Python<'_>, fragment: &str) -> PyResult<ParsedMsfFragment> {
+    let parsed = uri::parse_msf_fragment(fragment).map_err(codec_error)?;
+    let namespace = track_namespace_to_python(py, &parsed.namespace)?;
+    let parameters = parsed
+        .parameters
+        .into_iter()
+        .map(|parameter| (parameter.name, parameter.value))
+        .collect();
+    Ok((
+        namespace.into_any(),
+        PyBytes::new(py, &parsed.track_name).unbind(),
+        parameters,
+    ))
+}
+
+/// MSF の Track 識別子 (`namespace--track` 形式) を namespace と Track 名へ分解する
+/// (draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names))。
+#[pyfunction]
+pub(crate) fn parse_name(py: Python<'_>, text: &str) -> PyResult<(Py<PyAny>, Py<PyBytes>)> {
+    let (namespace, track_name) = name::parse_name(text)
+        .map_err(|error| PyValueError::new_err(format!("invalid Track name: {error:?}")))?;
+    let namespace = track_namespace_to_python(py, &namespace)?;
+    Ok((namespace.into_any(), PyBytes::new(py, &track_name).unbind()))
+}
+
+/// namespace と Track 名を MSF の Track 識別子 (`namespace--track` 形式) へ変換する。
+#[pyfunction]
+pub(crate) fn serialize_name(namespace: Vec<Vec<u8>>, track_name: &[u8]) -> PyResult<String> {
+    let namespace = crate::core::track_namespace_from_python(namespace)?;
+    Ok(name::serialize_name(&namespace, track_name))
 }
 
 /// MSF の定数をモジュール定数として登録する。

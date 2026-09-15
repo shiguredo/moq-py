@@ -466,3 +466,80 @@ def test_resolve_catalog_variables_substitutes_fragment_values() -> None:
     assert Catalog.decode(resolved).tracks == [
         {"name": "video", "packaging": "loc", "isLive": True}
     ]
+
+
+def test_resolve_timeline_template_computes_entries() -> None:
+    """
+    media timeline template から n 番目のエントリを計算することを確認する。
+
+    式は `media_time = start_media_time + delta_media_time * n`、
+    `group_id = start_group_id + delta_group_id * n`、
+    `object_id = start_object_id + delta_object_id * n`、
+    `wallclock = start_wallclock + delta_wallclock * n` である
+    (draft-ietf-moq-msf-01 §7.4.1)。
+    """
+    template = [1000, 33, [1, 0], [1, 2], 5000, 33]
+
+    assert msf.resolve_timeline_template(template, 0) == (1000, 1, 0, 5000)
+    assert msf.resolve_timeline_template(template, 3) == (1099, 4, 6, 5099)
+
+
+def test_resolve_timeline_template_rejects_a_short_array() -> None:
+    """要素数が 6 でない template を拒否することを確認する。"""
+    with pytest.raises(ValueError, match="6 elements"):
+        msf.resolve_timeline_template([1000, 33], 0)
+
+
+def test_resolve_timeline_template_reports_overflow_as_none() -> None:
+    """計算が overflow する場合は `None` を返すことを確認する。"""
+    template = [2**64 - 1, 2**64 - 1, [0, 0], [0, 0], 0, 0]
+
+    assert msf.resolve_timeline_template(template, 2) is None
+
+
+def test_parse_msf_fragment_splits_the_identifier_and_parameters() -> None:
+    """
+    `msf:` prefix 付きの fragment を namespace と Track 名とパラメータへ分解する。
+
+    (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+    """
+    namespace, track_name, parameters = msf.parse_msf_fragment("msf:room-1--video&x=1&y=2")
+
+    assert namespace == [b"room", b"1"]
+    assert track_name == b"video"
+    assert parameters == [("x", "1"), ("y", "2")]
+
+
+def test_parse_msf_fragment_rejects_a_missing_prefix() -> None:
+    """`msf:` prefix の無い入力を拒否することを確認する。"""
+    with pytest.raises(ValueError, match="msf:"):
+        msf.parse_msf_fragment("room-1--video")
+
+
+def test_parse_name_and_serialize_name_round_trip() -> None:
+    """
+    Track 識別子と namespace + Track 名が相互変換できることを確認する。
+
+    namespace の区切りは `-`、namespace と Track 名の境界は `--` である
+    (draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names))。
+    """
+    namespace, track_name = msf.parse_name("room-1--video")
+
+    assert namespace == [b"room", b"1"]
+    assert track_name == b"video"
+    assert msf.serialize_name(namespace, track_name) == "room-1--video"
+
+
+def test_serialize_name_escapes_a_dot() -> None:
+    """リテラルでないバイトを `.` と 16 進 2 桁でエスケープすることを確認する。
+
+    (draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names))
+    """
+    assert msf.serialize_name([b"room.1"], b"video") == "room.2e1--video"
+    assert msf.parse_name("room.2e1--video") == ([b"room.1"], b"video")
+
+
+def test_parse_name_rejects_a_triple_hyphen() -> None:
+    """境界が 2 連続でない入力を拒否することを確認する。"""
+    with pytest.raises(ValueError, match="invalid Track name"):
+        msf.parse_name("room---video")

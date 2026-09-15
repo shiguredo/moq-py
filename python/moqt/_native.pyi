@@ -1057,10 +1057,39 @@ def parse_fragment_pairs(fragment: str) -> list[tuple[str, str]]:
     `msf:` prefix の検証は行わず、`&` 区切りの `名前=値` を取り出すだけである。
     """
 
+def parse_msf_fragment(fragment: str) -> tuple[Any, bytes, list[tuple[str, str]]]:
+    """
+    MSF fragment (`msf:` prefix 付き) を namespace と Track 名とパラメータへ分解する
+    (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))。
+
+    `Uri.parse` を通さない入力を扱う。返り値は
+    `(namespace, track_name, [(名前, 値), ...])` である。
+    """
+
+def parse_name(text: str) -> tuple[Any, bytes]:
+    """
+    MSF の Track 識別子 (`namespace--track` 形式) を namespace と Track 名へ分解する
+    (draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names))。
+    """
+
 def resolve_catalog_variables(document: bytes, fragment: str) -> bytes:
     """
     カタログの変数参照を fragment の値で解決する
     (draft-ietf-moq-msf-01 §5.4 (Catalog variables))。
+    """
+
+def resolve_timeline_template(template: list, n: int) -> tuple[int, int, int, int] |None:
+    """
+    MSF の media timeline template から n 番目のエントリを計算する
+    (draft-ietf-moq-msf-01 §7.4.1)。
+
+    `template` は `Catalog.tracks` の `template` 配列である。値が負の整数または
+    配列でない場合は `ValueError` になる。計算が overflow する場合は `None` を返す。
+    """
+
+def serialize_name(namespace: Sequence[Sequence[int]], track_name: bytes) -> str:
+    """
+    namespace と Track 名を MSF の Track 識別子 (`namespace--track` 形式) へ変換する。
     """
 
 def setup_stream_type() -> int:

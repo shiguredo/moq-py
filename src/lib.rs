@@ -90,7 +90,8 @@ mod _native {
     #[pymodule_export]
     use crate::msf::{
         Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri, parse_fragment_pairs,
-        resolve_catalog_variables,
+        parse_msf_fragment, parse_name, resolve_catalog_variables, resolve_timeline_template,
+        serialize_name,
     };
 
     /// モジュール定数を登録する。
