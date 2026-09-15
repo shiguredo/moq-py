@@ -198,6 +198,23 @@ async def test_client_publish_and_object_delivery(moq_pair: MoqPair) -> None:
     await publication.close()
 
 
+async def test_session_timeouts_can_be_configured(
+    moq_client_factory: ClientFactory,
+) -> None:
+    """
+    セッションのタイムアウトを設定しても通常の通信が成立することを確認する。
+
+    タイムアウトは peer の停止を検出する期限であり、既定では無効である
+    (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+    """
+    client = await moq_client_factory(
+        control_message_timeout=5.0,
+        data_stream_timeout=5.0,
+    )
+
+    assert client.established
+
+
 async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> None:
     """
     server の GOAWAY が client へ通知されることを確認する。

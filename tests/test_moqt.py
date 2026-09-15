@@ -608,3 +608,97 @@ def test_padding() -> None:
     assert [event.kind for event in events] == ["send_padding_stream"]
     events = client.send_padding_datagram(32)
     assert [event.kind for event in events] == ["send_padding_datagram"]
+
+
+# ─── 定数 ───────────────────────────────────────────────────
+
+
+def test_session_termination_codes_are_drafted_values() -> None:
+    """Session Termination のコードが draft の値と一致することを確認する。
+
+    (draft-ietf-moq-transport-21 §16.11.1 (Session Termination Codes))
+    """
+    assert moqt.SESSION_NO_ERROR == 0x0
+    assert moqt.SESSION_INTERNAL_ERROR == 0x1
+    assert moqt.SESSION_UNAUTHORIZED == 0x2
+    assert moqt.SESSION_PROTOCOL_VIOLATION == 0x3
+    assert moqt.SESSION_INVALID_REQUEST_ID == 0x4
+    assert moqt.SESSION_DUPLICATE_TRACK_ALIAS == 0x5
+    assert moqt.SESSION_KEY_VALUE_FORMATTING_ERROR == 0x6
+    assert moqt.SESSION_INVALID_PATH == 0x8
+    assert moqt.SESSION_MALFORMED_PATH == 0x9
+    assert moqt.SESSION_GOAWAY_TIMEOUT == 0x10
+    assert moqt.SESSION_CONTROL_MESSAGE_TIMEOUT == 0x11
+    assert moqt.SESSION_DATA_STREAM_TIMEOUT == 0x12
+    assert moqt.SESSION_TOO_MANY_REQUEST_UPDATES == 0x1B
+
+    # 自側の判断で使うコードは wire の値域の外にある
+    assert moqt.SESSION_LOCAL_FILTER_MISMATCH == 0xFFFF_FFFF_FFFF_FF01
+    assert moqt.SESSION_LOCAL_DATAGRAM_TIMEOUT == 0xFFFF_FFFF_FFFF_FF02
+
+
+def test_request_error_codes_are_drafted_values() -> None:
+    """REQUEST_ERROR のコードが draft の値と一致することを確認する。
+
+    (draft-ietf-moq-transport-21 §16.11.2 (REQUEST_ERROR Codes))
+    """
+    assert moqt.REQUEST_INTERNAL_ERROR == 0x0
+    assert moqt.REQUEST_UNAUTHORIZED == 0x1
+    assert moqt.REQUEST_TIMEOUT == 0x2
+    assert moqt.REQUEST_NOT_SUPPORTED == 0x3
+    assert moqt.REQUEST_MALFORMED_AUTH_TOKEN == 0x4
+    assert moqt.REQUEST_EXPIRED_AUTH_TOKEN == 0x5
+    assert moqt.REQUEST_GOING_AWAY == 0x6
+    assert moqt.REQUEST_EXCESSIVE_LOAD == 0x9
+    assert moqt.REQUEST_DOES_NOT_EXIST == 0x10
+    assert moqt.REQUEST_INVALID_RANGE == 0x11
+    assert moqt.REQUEST_MALFORMED_TRACK == 0x12
+    assert moqt.REQUEST_UNINTERESTED == 0x20
+    assert moqt.REQUEST_PREFIX_OVERLAP == 0x30
+    assert moqt.REQUEST_NAMESPACE_TOO_LARGE == 0x31
+    assert moqt.REQUEST_UNSUPPORTED_EXTENSION == 0x33
+    assert moqt.REQUEST_REDIRECT == 0x34
+    assert moqt.REQUEST_CONFLICTING_FILTERS == 0x35
+    assert moqt.REQUEST_INVALID_FILTER == 0x36
+
+
+def test_publish_done_and_stream_codes_are_drafted_values() -> None:
+    """PUBLISH_DONE と stream reset のコードが draft の値と一致することを確認する。
+
+    (draft-ietf-moq-transport-21 §16.11.3 (PUBLISH_DONE Codes) /
+     §16.11.4 (Stream Reset Codes))
+    """
+    assert moqt.PUBLISH_DONE_INTERNAL_ERROR == 0x0
+    assert moqt.PUBLISH_DONE_UNAUTHORIZED == 0x1
+    assert moqt.PUBLISH_DONE_TRACK_ENDED == 0x2
+    assert moqt.PUBLISH_DONE_GOING_AWAY == 0x4
+    assert moqt.PUBLISH_DONE_TOO_FAR_BEHIND == 0x5
+    assert moqt.PUBLISH_DONE_EXPIRED == 0x6
+    assert moqt.PUBLISH_DONE_UPDATE_FAILED == 0x8
+    assert moqt.PUBLISH_DONE_EXCESSIVE_LOAD == 0x9
+    assert moqt.PUBLISH_DONE_MALFORMED_TRACK == 0x12
+
+    assert moqt.STREAM_INTERNAL_ERROR == 0x0
+    assert moqt.STREAM_CANCELLED == 0x1
+    assert moqt.STREAM_DELIVERY_TIMEOUT == 0x2
+    assert moqt.STREAM_SESSION_CLOSED == 0x3
+    assert moqt.STREAM_GOING_AWAY == 0x4
+    assert moqt.STREAM_TOO_FAR_BEHIND == 0x5
+    assert moqt.STREAM_UNKNOWN_OBJECT_STATUS == 0x6
+    assert moqt.STREAM_EXPIRED_AUTH_TOKEN == 0x7
+    assert moqt.STREAM_EXCESSIVE_LOAD == 0x9
+    assert moqt.STREAM_MALFORMED_TRACK == 0x12
+
+
+def test_setup_option_types_are_drafted_values() -> None:
+    """SETUP オプションの型番号が draft の値と一致することを確認する。
+
+    (draft-ietf-moq-transport-21 §9.1 (SETUP))
+    """
+    assert moqt.SETUP_OPTION_PATH == 0x01
+    assert moqt.SETUP_OPTION_AUTHORIZATION_TOKEN == 0x03
+    assert moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE == 0x04
+    assert moqt.SETUP_OPTION_AUTHORITY == 0x05
+    assert moqt.SETUP_OPTION_MAX_FILTER_RANGES == 0x06
+    assert moqt.SETUP_OPTION_MOQT_IMPLEMENTATION == 0x07
+    assert moqt.SETUP_OPTION_MAX_REQUEST_UPDATES == 0x08

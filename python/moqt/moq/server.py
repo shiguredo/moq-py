@@ -247,7 +247,16 @@ class Server:
         keyfile: str,
         allowed_origins: list[str] | None = None,
         implementation: str = "moqt-py",
+        control_message_timeout: float | None = None,
+        data_stream_timeout: float | None = None,
     ) -> None:
+        """server を作成する。
+
+        `control_message_timeout` と `data_stream_timeout` は peer の停止を検出する
+        期限 (秒) である。省略した場合は期限を設けない。設定すると期限切れで
+        セッションが終了する
+        (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+        """
         self._transport = h3.Server(
             host=host,
             port=port,
@@ -256,6 +265,8 @@ class Server:
             allowed_origins=allowed_origins,
         )
         self._implementation = implementation
+        self._control_message_timeout = control_message_timeout
+        self._data_stream_timeout = data_stream_timeout
         self._connections: dict[tuple[tuple[str, int], int], _Connection] = {}
         self._on_session_established: Callable[[ServerSession], Awaitable[None]] | None = None
         self._on_subscribe: Callable[[SubscriptionRequest], Awaitable[None]] | None = None
@@ -523,6 +534,8 @@ class Server:
             implementation=self._implementation,
             ops=self._transport_ops(address, session_id),
             events=self._runtime_events(context),
+            control_message_timeout=self._control_message_timeout,
+            data_stream_timeout=self._data_stream_timeout,
         )
         self._connections[key] = _Connection(
             runtime=runtime, address=address, session_id=session_id

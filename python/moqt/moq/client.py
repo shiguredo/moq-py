@@ -231,7 +231,16 @@ class Client:
         origin: str = "",
         ca_file: str | None = None,
         implementation: str = "moqt-py",
+        control_message_timeout: float | None = None,
+        data_stream_timeout: float | None = None,
     ) -> None:
+        """client を作成する。
+
+        `control_message_timeout` と `data_stream_timeout` は peer の停止を検出する
+        期限 (秒) である。省略した場合は期限を設けない。設定すると期限切れで
+        セッションが終了する
+        (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+        """
         self._transport = h3.Client(
             url=url,
             verify_peer=verify_peer,
@@ -239,6 +248,8 @@ class Client:
             ca_file=ca_file,
         )
         self._implementation = implementation
+        self._control_message_timeout = control_message_timeout
+        self._data_stream_timeout = data_stream_timeout
         self._runtime: Runtime | None = None
         self._established_event = asyncio.Event()
         self._connect_error: BaseException | None = None
@@ -323,6 +334,8 @@ class Client:
             ops=self._transport_ops(),
             events=self._runtime_events(),
             on_task_error=self._on_task_error,
+            control_message_timeout=self._control_message_timeout,
+            data_stream_timeout=self._data_stream_timeout,
         )
         self._run_task = asyncio.create_task(self._transport.run())
         self._run_task.add_done_callback(self._on_run_done)

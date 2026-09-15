@@ -57,6 +57,8 @@ class ClientFactory(Protocol):
         verify_peer: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
         url: str | None = None,
+        control_message_timeout: float | None = None,
+        data_stream_timeout: float | None = None,
     ) -> Client:
         """接続を確立した `Client` を返す。
 
@@ -64,6 +66,8 @@ class ClientFactory(Protocol):
             verify_peer: サーバー証明書を検証するか。
             timeout: 接続と MoQT SETUP の待ち合わせ秒数。
             url: 接続先。省略した場合は `moq_server` の待ち受け先を使う。
+            control_message_timeout: 制御メッセージの応答待ちの期限 (秒)。
+            data_stream_timeout: データストリームの停止を検出する期限 (秒)。
         """
         ...
 
@@ -215,9 +219,16 @@ async def moq_client_factory(moq_server: Server) -> AsyncIterator[ClientFactory]
         verify_peer: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
         url: str | None = None,
+        control_message_timeout: float | None = None,
+        data_stream_timeout: float | None = None,
     ) -> Client:
         target = url or f"https://127.0.0.1:{moq_server.actual_port}/webtransport"
-        client = Client(url=target, verify_peer=verify_peer)
+        client = Client(
+            url=target,
+            verify_peer=verify_peer,
+            control_message_timeout=control_message_timeout,
+            data_stream_timeout=data_stream_timeout,
+        )
         await client.connect(timeout=timeout)
         clients.append(client)
         return client

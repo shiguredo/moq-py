@@ -301,12 +301,21 @@ class Runtime:
         ops: TransportOps,
         events: RuntimeEvents,
         on_task_error: Callable[[BaseException], Awaitable[None]] | None = None,
+        control_message_timeout: float | None = None,
+        data_stream_timeout: float | None = None,
     ) -> None:
         self._core = (
             _native.Session.client(implementation)
             if client
             else _native.Session.server(implementation)
         )
+        # タイムアウトは既定で無効である。設定すると tick が期限を判定し、期限切れの
+        # セッションを SESSION_CONTROL_MESSAGE_TIMEOUT / SESSION_DATA_STREAM_TIMEOUT で
+        # 終了する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+        if control_message_timeout is not None:
+            self._core.set_control_message_timeout_ms(_to_milliseconds(control_message_timeout))
+        if data_stream_timeout is not None:
+            self._core.set_data_stream_timeout_ms(_to_milliseconds(data_stream_timeout))
         self._ops = ops
         self._events = events
         self._on_task_error = on_task_error
@@ -1189,6 +1198,15 @@ def _message_int(event: NativeEvent, key: str) -> int:
     if not isinstance(value, int):
         raise MoqtError(f"event {event.kind} has no integer field {key}")
     return value
+
+
+def _to_milliseconds(seconds: float) -> int:
+    """秒をミリ秒の整数へ変換する。
+
+    状態機械はミリ秒で期限を判定する。0 以下の値は期限を即時にするため、
+    呼び出し側の意図しない設定を避けて 1 ms を下限にする。
+    """
+    return max(1, round(seconds * 1000))
 
 
 def _is_bidirectional(stream_id: int) -> bool:
