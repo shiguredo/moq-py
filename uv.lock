@@ -190,11 +190,18 @@ wheels = [
 ]
 
 [[package]]
-name = "moqt-py"
-version = "0.1.0"
+name = "moq-py"
+version = "2026.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "webtransport-py" },
+]
+
+[package.optional-dependencies]
+testing = [
+    { name = "cryptography" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 
 [package.dev-dependencies]
@@ -210,16 +217,22 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "webtransport-py", directory = "../webtransport-py" }]
+requires-dist = [
+    { name = "cryptography", marker = "extra == 'testing'", specifier = ">=50.0,<51" },
+    { name = "pytest", marker = "extra == 'testing'", specifier = ">=9.0,<10" },
+    { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=1.4,<2" },
+    { name = "webtransport-py", specifier = ">=2026.1.0.dev18,<2026.2" },
+]
+provides-extras = ["testing"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "cryptography" },
-    { name = "hypothesis" },
+    { name = "cryptography", specifier = ">=50.0,<51" },
+    { name = "hypothesis", specifier = ">=6.140,<7" },
     { name = "maturin", specifier = ">=1.14.1,<2.0" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-timeout" },
+    { name = "pytest", specifier = ">=9.0,<10" },
+    { name = "pytest-asyncio", specifier = ">=1.4,<2" },
+    { name = "pytest-timeout", specifier = ">=2.4,<3" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -361,33 +374,13 @@ wheels = [
 
 [[package]]
 name = "webtransport-py"
-source = { directory = "../webtransport-py" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-build = [
-    { name = "nanobind", specifier = "~=3.0.0" },
-    { name = "scikit-build-core", specifier = ">=1.0.3" },
-]
-dev = [
-    { name = "cryptography" },
-    { name = "hypothesis" },
-    { name = "nanobind", specifier = "~=3.0.0" },
-    { name = "playwright", specifier = "~=1.62.0" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-playwright", specifier = "~=0.9.0" },
-    { name = "pytest-timeout" },
-    { name = "ruff", specifier = "==0.16.6" },
-    { name = "scikit-build-core", specifier = ">=1.0.3" },
-    { name = "structlog" },
-]
-example = [{ name = "structlog" }]
-test = [
-    { name = "cryptography" },
-    { name = "hypothesis" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-timeout" },
+version = "2026.1.0.dev18"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/7b/e7d316a7978d4bc8a3454dba8543036bf33931bae071e810edfdd8f811cd/webtransport_py-2026.1.0.dev18-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:6f8a9b3adb87dd869e21d688f76e8d82c77c8f18bac4e6a6ab535cb6f4c20f2d", size = 1914618, upload-time = "2026-09-14T13:55:34.413Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/ea/65f3b6f628a994261b2a39386297cbd97341d91961c32a82f79be3f6ee71/webtransport_py-2026.1.0.dev18-cp314-cp314-manylinux_2_39_aarch64.whl", hash = "sha256:1f6979cecea0c851ce0b86b367a0d754bc523cb13ce3e43f1f823145104aa0b1", size = 2116723, upload-time = "2026-09-14T13:55:30.376Z" },
+    { url = "https://files.pythonhosted.org/packages/31/bc/55decd40218d5748e8107c6c65bea978a6dd89a690099fcc94e980538d48/webtransport_py-2026.1.0.dev18-cp314-cp314-manylinux_2_39_x86_64.whl", hash = "sha256:920fcde3c30cb7eabebb91a653c52f79d23cd9a1bb7687627cc420bebd1edfee", size = 2296451, upload-time = "2026-09-14T13:55:31.976Z" },
+    { url = "https://files.pythonhosted.org/packages/04/73/6c4d98dfcf3f370c07825a529513aee6c1cc3f4d565730804e5cde202e1b/webtransport_py-2026.1.0.dev18-cp314-cp314t-macosx_26_0_arm64.whl", hash = "sha256:e6fc8787e7f1f2a311b64fc013f6be57b1f206c93bc8725c4036908f6292bf3b", size = 1926412, upload-time = "2026-09-14T13:55:29.171Z" },
+    { url = "https://files.pythonhosted.org/packages/67/55/aa050df9eadedb77d35ab84ec27e10b4bed3727fe4970bc57972de4f52eb/webtransport_py-2026.1.0.dev18-cp314-cp314t-manylinux_2_39_aarch64.whl", hash = "sha256:0141a034dc678052c19172be823106d5db4f9bde58ed1672f12e712ce38479cf", size = 2122814, upload-time = "2026-09-14T13:55:27.506Z" },
+    { url = "https://files.pythonhosted.org/packages/61/9c/60e734780fd22d7d1bdbdfa6ae40bfc0a87233acaceabe354f17edee708a/webtransport_py-2026.1.0.dev18-cp314-cp314t-manylinux_2_39_x86_64.whl", hash = "sha256:ad30d9387c768c37d22b0ff49010d68c9fd6deae6124a1a768f3dc2e895fbd84", size = 2300925, upload-time = "2026-09-14T13:55:37.774Z" },
 ]

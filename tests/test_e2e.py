@@ -1,98 +1,82 @@
 """webtransport-py と moqt-rs を接続する実通信テスト。"""
 
-from __future__ import annotations
-
-import asyncio
-import contextlib
-from typing import TYPE_CHECKING
+import importlib
+import logging
 
 import pytest
-from moqt import Client, Server
-from moqt.client import Fetch, MoqtObject, Subscription
-from moqt.server import (
-    FetchRequest,
-    Publication,
-    ServerSession,
-    SubscriptionRequest,
-)
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+from moq import Client, Fetch, MoqtObject, Subscription, moqt
+from moq._runtime import MoqtError
+from moq.server import FetchRequest, Publication, SubscriptionRequest
+from moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
 
 # テストで使う Track
-NAMESPACE = [b"moqt-py", b"test"]
+NAMESPACE = [b"moq-py", b"test"]
 TRACK_NAME = b"video"
 TRACK_ALIAS = 1
 
-
-@pytest.fixture
-async def moqt_pair(
-    test_certificates: tuple[str, str],
-) -> AsyncIterator[tuple[Client, Server, ServerSession]]:
-    """localhost の実 WebTransport 接続で MoQT の client / server を接続する。"""
-    certfile, keyfile = test_certificates
-    server = Server(
-        host="127.0.0.1",
-        port=0,
-        certfile=certfile,
-        keyfile=keyfile,
-    )
-    server_established = asyncio.Event()
-    established_session: ServerSession | None = None
-
-    async def on_session_established(session: ServerSession) -> None:
-        nonlocal established_session
-        established_session = session
-        server_established.set()
-
-    server.on_session_established(on_session_established)
-    await server.start()
-    server_task = asyncio.create_task(server.run())
-    client = Client(
-        url=f"https://127.0.0.1:{server.actual_port}/webtransport",
-        verify_peer=False,
-    )
-
-    try:
-        await client.connect(timeout=5.0)
-        await asyncio.wait_for(server_established.wait(), timeout=5.0)
-        assert established_session is not None
-        yield client, server, established_session
-    finally:
-        await client.close()
-        await server.stop()
-        server_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await server_task
+# オブジェクトの待ち合わせの上限秒数
+OBJECT_TIMEOUT = 5.0
 
 
-@pytest.mark.asyncio
-async def test_client_and_server_exchange_setup_over_webtransport(
-    moqt_pair: tuple[Client, Server, ServerSession],
+async def _send_object(
+    publication: Publication,
+    kind: str,
+    payload: bytes,
+    status: int | None = None,
 ) -> None:
+    """subgroup とデータグラムのどちらかの経路でオブジェクトを送る。"""
+    if kind == "subgroup":
+        await publication.send_object(1, 0, payload, status=status)
+    else:
+        await publication.send_datagram(1, 0, payload, status=status)
+
+
+async def _take_objects(subscription: Subscription, count: int) -> list[MoqtObject]:
+    """subscription から指定件数のオブジェクトを取り出す。"""
+    return await collect_objects(subscription.objects(), count, OBJECT_TIMEOUT)
+
+
+async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
+    """fetch から指定件数のオブジェクトを取り出す。"""
+    return await collect_objects(fetch.objects(), count, OBJECT_TIMEOUT)
+
+
+async def test_client_and_server_exchange_setup_over_webtransport(moq_pair: MoqPair) -> None:
     """
     localhost の実 WebTransport 接続上で MoQT SETUP が成立することを確認する。
 
     SETUP 交換の完了、確立した session の識別情報、接続元アドレスを検証する。
     """
-    client, _server, session = moqt_pair
-
-    assert client.established
-    assert session.session_id >= 0
-    assert session.address[0] == "127.0.0.1"
+    assert moq_pair.client.established
+    assert moq_pair.session.session_id >= 0
+    assert moq_pair.session.address[0] == "127.0.0.1"
 
 
-@pytest.mark.asyncio
-async def test_subscribe_and_receive_objects_over_subgroup(
-    moqt_pair: tuple[Client, Server, ServerSession],
-) -> None:
+async def test_two_clients_connect_to_one_server(moq_client_factory: ClientFactory) -> None:
+    """
+    同じ server へ 2 本の client を接続できることを確認する。
+
+    `moq_client_factory` が返す factory を繰り返し呼び、それぞれの接続で
+    MoQT SETUP が成立することを検証する。
+    """
+    first: Client = await moq_client_factory()
+    second: Client = await moq_client_factory()
+
+    try:
+        assert first.established
+        assert second.established
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_subscribe_and_receive_objects_over_subgroup(moq_pair: MoqPair) -> None:
     """
     SUBSCRIBE / SUBSCRIBE_OK と subgroup ストリームのオブジェクト配送を確認する。
 
     client が購読し、server が同じ group のオブジェクトを 2 件送る。受信側で
     Group ID と Object ID が送信側と一致することを検証する。
     """
-    client, server, _session = moqt_pair
     subscribe_requests: list[SubscriptionRequest] = []
     published: list[Publication] = []
 
@@ -100,11 +84,11 @@ async def test_subscribe_and_receive_objects_over_subgroup(
         subscribe_requests.append(request)
         published.append(await request.subscribe_ok(TRACK_ALIAS))
 
-    server.on_subscribe(on_subscribe)
+    moq_pair.server.on_subscribe(on_subscribe)
 
-    subscription = await client.subscribe(NAMESPACE, TRACK_NAME)
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
     assert subscription.track_alias == TRACK_ALIAS
-    await _wait_until(lambda: bool(published))
+    await wait_until(lambda: bool(published))
     assert len(subscribe_requests) == 1
     assert subscribe_requests[0].namespace == tuple(NAMESPACE)
     assert subscribe_requests[0].track_name == TRACK_NAME
@@ -120,26 +104,122 @@ async def test_subscribe_and_receive_objects_over_subgroup(
     assert [item.payload for item in received] == [b"first", b"second"]
 
 
-@pytest.mark.asyncio
-async def test_subscribe_and_receive_objects_over_datagram(
-    moqt_pair: tuple[Client, Server, ServerSession],
+@pytest.mark.parametrize(
+    "payload_size",
+    [0, 127, 128, 16383, 16384],
+    ids=["empty", "1byte-max", "2byte-min", "2byte-max", "3byte-min"],
+)
+async def test_subgroup_object_payload_length_boundaries(
+    moq_pair: MoqPair,
+    payload_size: int,
 ) -> None:
+    """
+    ペイロード長が vi64 のエンコード長の境界にあっても配送できることを確認する。
+
+    vi64 は先頭バイトの leading-1-bits が長さを決めるため、1 バイトで表せるのは
+    0-127、2 バイトで表せるのは 0-16383 である
+    (draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers) Table 3)。
+
+    ペイロード長 0 のオブジェクトは Object Status を明示する必要がある
+    (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。境界をまたぐ長さで
+    subgroup オブジェクトを送り、受信側が同じバイト列を得られることを検証する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    payload = bytes(range(256)) * (payload_size // 256) + bytes(range(payload_size % 256))
+    assert len(payload) == payload_size
+    await published[0].send_object(1, 0, payload)
+
+    received = await _take_objects(subscription, 1)
+
+    assert len(received) == 1
+    assert received[0].payload == payload
+
+
+@pytest.mark.parametrize(
+    ("subgroup_id", "publisher_priority", "end_of_group"),
+    [
+        (None, None, False),
+        (0, None, False),
+        (7, None, False),
+        (200, None, False),
+        (None, 5, False),
+        (None, None, True),
+        (3, 100, True),
+    ],
+    ids=[
+        "default",
+        "explicit-zero",
+        "explicit-7",
+        "explicit-200",
+        "priority-5",
+        "end-of-group",
+        "all-fields",
+    ],
+)
+async def test_subgroup_header_variants_are_delivered(
+    moq_pair: MoqPair,
+    subgroup_id: int | None,
+    publisher_priority: int | None,
+    end_of_group: bool,
+) -> None:
+    """
+    subgroup ヘッダの各フィールドの組み合わせでオブジェクトが配送されることを確認する。
+
+    Subgroup ID を明示する場合は SUBGROUP_ID_MODE を 0b10 にしなければならない
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。Publisher Priority を
+    省略するかどうかと End of Group の有無も含めて、受信側が同じペイロードを
+    得られることを検証する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    await published[0].send_object(
+        1,
+        0,
+        b"header variant",
+        subgroup_id=subgroup_id,
+        publisher_priority=publisher_priority,
+        end_of_group=end_of_group,
+    )
+
+    received = await _take_objects(subscription, 1)
+
+    assert len(received) == 1
+    assert received[0].payload == b"header variant"
+
+
+async def test_subscribe_and_receive_objects_over_datagram(moq_pair: MoqPair) -> None:
     """
     オブジェクトデータグラムの配送を確認する。
 
     subgroup ストリームではなくデータグラムで送ったオブジェクトが、
     同じ Group ID と Object ID で受信できることを検証する。
     """
-    client, server, _session = moqt_pair
     published: list[Publication] = []
 
     async def on_subscribe(request: SubscriptionRequest) -> None:
         published.append(await request.subscribe_ok(TRACK_ALIAS))
 
-    server.on_subscribe(on_subscribe)
+    moq_pair.server.on_subscribe(on_subscribe)
 
-    subscription = await client.subscribe(NAMESPACE, TRACK_NAME)
-    await _wait_until(lambda: bool(published))
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
 
     await published[0].send_datagram(7, 0, b"datagram payload")
 
@@ -151,67 +231,204 @@ async def test_subscribe_and_receive_objects_over_datagram(
     assert received[0].payload == b"datagram payload"
 
 
-# client から FETCH を送る経路は、応答後にライブラリがセッションを閉じる
-# 不具合が残っている (issues/0001-bug-fetch-response-closes-session.md)。
-@pytest.mark.xfail(reason="FETCH の応答処理が未完成である", strict=False)
-@pytest.mark.asyncio
-async def test_fetch_receives_objects(
-    moqt_pair: tuple[Client, Server, ServerSession],
+async def test_datagram_with_an_empty_payload_is_delivered(moq_pair: MoqPair) -> None:
+    """
+    ペイロードが空のオブジェクトデータグラムが配送されることを確認する。
+
+    データグラムはペイロード長を持たないため、ペイロードが無い場合は STATUS bit を
+    立てて Object Status を明示しなければならない
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    await published[0].send_datagram(7, 0, b"")
+
+    received = await _take_objects(subscription, 1)
+
+    assert len(received) == 1
+    assert received[0].group_id == 7
+    assert received[0].object_id == 0
+    assert received[0].payload == b""
+    assert received[0].status == moqt.OBJECT_STATUS_NORMAL
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        moqt.OBJECT_STATUS_NORMAL,
+        moqt.OBJECT_STATUS_END_OF_GROUP,
+        moqt.OBJECT_STATUS_END_OF_TRACK,
+    ],
+    ids=["normal", "end-of-group", "end-of-track"],
+)
+@pytest.mark.parametrize("send", ["subgroup", "datagram"], ids=["subgroup", "datagram"])
+async def test_object_status_is_delivered(
+    moq_pair: MoqPair,
+    status: int,
+    send: str,
 ) -> None:
+    """
+    Object Status を付けたオブジェクトが受信側で同じ status として観測されることを確認する。
+
+    ペイロード長 0 のオブジェクトは Object Status を明示する
+    (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。subgroup とデータグラムの
+    どちらの経路でも status が保たれることを検証する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    await _send_object(published[0], send, b"", status)
+
+    received = await _take_objects(subscription, 1)
+
+    assert len(received) == 1
+    assert received[0].payload == b""
+    assert received[0].status == status
+
+
+@pytest.mark.parametrize("send", ["subgroup", "datagram"], ids=["subgroup", "datagram"])
+async def test_object_status_rejects_a_payload(moq_pair: MoqPair, send: str) -> None:
+    """
+    Normal 以外の Object Status にペイロードを付けた場合に拒否することを確認する。
+
+    draft-ietf-moq-transport-21 §11.1.2 (Object Status): "An Object MUST have an
+    empty payload unless its Object Status value is registered as permitting a
+    payload in the Object Status registry"。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    with pytest.raises(MoqtError, match="requires an empty payload"):
+        await _send_object(published[0], send, b"data", moqt.OBJECT_STATUS_END_OF_GROUP)
+
+
+@pytest.mark.parametrize("send", ["subgroup", "datagram"], ids=["subgroup", "datagram"])
+async def test_object_status_rejects_an_unknown_value(moq_pair: MoqPair, send: str) -> None:
+    """
+    未知の Object Status を拒否することを確認する。
+
+    draft-ietf-moq-transport-21 §11.1.2 (Object Status): "Any other value SHOULD be
+    treated as a protocol error"。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    with pytest.raises(MoqtError, match="unknown object status"):
+        await _send_object(published[0], send, b"", 0x99)
+
+
+@pytest.mark.parametrize("oversized", [False, True], ids=["fits", "oversized"])
+async def test_datagram_size_is_reported_before_sending(
+    moq_pair: MoqPair,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    oversized: bool,
+) -> None:
+    """
+    経路に依存せず運べる大きさを超えるデータグラムを送信前に警告することを確認する。
+
+    上限を超えたデータグラムは経路によっては通知なく破棄され、送信側からは検知
+    できない (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。受信待ちで
+    止まる前に原因が分かるよう、送信時に警告を記録する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # MoQT のヘッダもデータグラムに含まれるため、ペイロードは上限と同じか半分にする
+    payload_size = moqt.MAX_DATAGRAM_SIZE if oversized else moqt.MAX_DATAGRAM_SIZE // 2
+
+    with caplog.at_level(logging.WARNING, logger="moq._runtime"):
+        await published[0].send_datagram(1, 0, bytes(payload_size))
+
+    reported = "exceeds the portable limit" in caplog.text
+    assert reported is oversized
+
+
+async def test_fetch_receives_objects(moq_pair: MoqPair) -> None:
     """
     FETCH で要求した過去のオブジェクトが fetch stream で届くことを確認する。
 
-    client が FETCH を送り、server が FETCH_OK と fetch stream で
-    2 件のオブジェクトを返す。Group ID / Object ID / ペイロードが
-    送信側と一致することを検証する。
+    client が FETCH を送り、server が FETCH_OK と fetch stream でオブジェクトを
+    返す。Group ID / Object ID / ペイロードが送信側と一致することを検証する。
+
+    fetch stream の Group ID と Object ID は直前のオブジェクトを基準に差分で
+    表現されるため、同じ Group 内の 2 件目と Group をまたぐ 3 件目を含める
+    (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。ペイロード長 0 の
+    オブジェクトも扱う。
     """
-    client, server, _session = moqt_pair
-    responded = asyncio.Event()
+    responded = False
 
     async def on_fetch(request: FetchRequest) -> None:
+        nonlocal responded
         response = await request.respond((9, 9), end_of_track=False)
         await response.send_object(5, 10, b"fetched-1")
         await response.send_object(5, 11, b"fetched-2")
+        await response.send_object(6, 0, b"fetched-3")
+        await response.send_object(6, 1, b"")
         await response.close()
-        responded.set()
+        responded = True
 
-    server.on_fetch(on_fetch)
+    moq_pair.server.on_fetch(on_fetch)
 
-    fetch = await client.fetch(NAMESPACE, TRACK_NAME)
+    fetch = await moq_pair.client.fetch(NAMESPACE, TRACK_NAME)
     assert fetch.end_of_track is False
     assert fetch.end_location == (9, 9)
-    await asyncio.wait_for(responded.wait(), timeout=5.0)
+    await wait_until(lambda: responded)
 
-    received = await _take_fetch_objects(fetch, 2)
-    assert [item.group_id for item in received] == [5, 5]
-    assert [item.object_id for item in received] == [10, 11]
-    assert [item.payload for item in received] == [b"fetched-1", b"fetched-2"]
-
-
-async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
-    """fetch から指定件数のオブジェクトを取り出す。"""
-    received: list[MoqtObject] = []
-    iterator = fetch.objects()
-    for _ in range(count):
-        received.append(await asyncio.wait_for(anext(iterator), timeout=5.0))
-    return received
+    received = await _take_fetch_objects(fetch, 4)
+    assert [item.group_id for item in received] == [5, 5, 6, 6]
+    assert [item.object_id for item in received] == [10, 11, 0, 1]
+    assert [item.payload for item in received] == [
+        b"fetched-1",
+        b"fetched-2",
+        b"fetched-3",
+        b"",
+    ]
 
 
-async def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
-    """述語が真になるまで待つ。"""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.01)
-    raise TimeoutError("condition was not satisfied in time")
+def test_public_names_are_exported_from_the_package_root() -> None:
+    """
+    `moq` の `__all__` に挙げた名前がすべて取り出せることを確認する。
 
-
-async def _take_objects(subscription: Subscription, count: int) -> list[MoqtObject]:
-    """subscription から指定件数のオブジェクトを取り出す。"""
-    received: list[MoqtObject] = []
-    iterator = subscription.objects()
-    for _ in range(count):
-        received.append(await asyncio.wait_for(anext(iterator), timeout=5.0))
-    return received
+    利用者が `moq.client` や `moq.server` ではなく `moq` から import できる
+    ことを検証する。
+    """
+    package = importlib.import_module("moq")
+    for name in package.__all__:
+        assert getattr(package, name, None) is not None, name

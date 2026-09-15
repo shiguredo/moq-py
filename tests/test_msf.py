@@ -1,0 +1,468 @@
+"""`moq.msf` のカタログとタイムラインの codec テスト。"""
+
+import json
+
+import pytest
+from moq import msf
+from moq.msf import Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri
+
+# このライブラリが対応する MSF のバージョン (draft-ietf-moq-msf-01 §5.1.1)。
+SUPPORTED_VERSION = "draft-01"
+
+# 最小のカタログ。tracks は必須である (draft-ietf-moq-msf-01 §5.1.4)。
+MINIMAL_CATALOG = '{"version":"draft-01","tracks":[]}'
+
+# トラック 1 件を持つカタログ。
+ONE_TRACK_CATALOG = (
+    '{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true}]}'
+)
+
+# トラックを 1 件追加する delta 更新。
+ADD_AUDIO = (
+    '{"deltaUpdate":[{"op":"add","tracks":[{"name":"audio","packaging":"loc","isLive":true}]}]}'
+)
+
+
+def test_msf_version_matches_the_supported_draft() -> None:
+    """
+    対応する MSF のバージョンが draft-01 であることを確認する。
+
+    カタログの version と一致しない文書は decode が拒否する。
+    """
+    assert msf.MSF_VERSION == SUPPORTED_VERSION
+
+
+def test_catalog_track_name_is_catalog() -> None:
+    """
+    カタログを配信する Track 名が `catalog` であることを確認する。
+
+    (draft-ietf-moq-msf-01 §4.1)
+    """
+    assert msf.CATALOG_TRACK_NAME == b"catalog"
+
+
+def test_catalog_round_trips_through_json() -> None:
+    """
+    カタログが decode と encode で往復することを確認する。
+
+    トラックのフィールド名は draft の表記のままで読める。
+    """
+    catalog = Catalog.decode(ONE_TRACK_CATALOG.encode())
+
+    assert catalog.version == SUPPORTED_VERSION
+    assert catalog.is_complete is False
+    assert catalog.generated_at is None
+    assert catalog.tracks == [{"name": "video", "packaging": "loc", "isLive": True}]
+    assert catalog.encode() == ONE_TRACK_CATALOG.encode()
+
+
+def test_catalog_reports_optional_members_as_empty() -> None:
+    """
+    publishTracks と initDataList が省略されたカタログで空列を返すことを確認する。
+
+    draft-ietf-moq-msf-01 §5.1.5 と §5.1.7 は空配列の省略を許すため、
+    読み出し側は欠落を空列として扱う必要がある。
+    """
+    catalog = Catalog.parse(MINIMAL_CATALOG)
+
+    assert catalog.publish_tracks == []
+    assert catalog.init_data_list == []
+
+
+def test_catalog_reads_optional_members() -> None:
+    """
+    publishTracks と initDataList を持つカタログを読めることを確認する。
+
+    (draft-ietf-moq-msf-01 §5.1.5 (Publish tracks) / §5.1.7 (Initialization Data List))
+    """
+    catalog = Catalog.parse(
+        '{"version":"draft-01","tracks":[],'
+        '"publishTracks":[{"name":"p","packaging":"loc","isLive":true}],'
+        '"initDataList":[{"id":"init","type":"inline","data":"AAAA"}]}'
+    )
+
+    assert catalog.publish_tracks == [{"name": "p", "packaging": "loc", "isLive": True}]
+    assert catalog.init_data_list == [{"id": "init", "type": "inline", "data": "AAAA"}]
+
+
+def test_catalog_accepts_surrogate_pair_escapes() -> None:
+    """
+    BMP 外の文字をサロゲートペアでエスケープしたカタログを読めることを確認する。
+
+    `json.dumps` の既定値は BMP 外の文字を 12 文字のサロゲートペアへエスケープする。
+    JSON のパーサはこれを結合して 1 文字として読まなければならない
+    (RFC 8259 §7 (String))。
+    """
+    name = "\U00010000"
+    document = json.dumps(
+        {
+            "version": SUPPORTED_VERSION,
+            "tracks": [{"name": name, "packaging": "loc", "isLive": True}],
+        }
+    )
+    assert "\\ud800\\udc00" in document
+
+    catalog = Catalog.parse(document)
+
+    assert catalog.tracks == [{"name": name, "packaging": "loc", "isLive": True}]
+
+
+def test_catalog_rejects_an_unsupported_version() -> None:
+    """
+    対応しない version のカタログを拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.1.1 (MSF version))
+    """
+    with pytest.raises(ValueError, match="unsupported MSF catalog version: draft-99"):
+        Catalog.parse('{"version":"draft-99","tracks":[]}')
+
+
+def test_catalog_rejects_a_delta_update_document() -> None:
+    """
+    delta 更新の文書を `Catalog` で読もうとした場合に拒否することを確認する。
+
+    完全カタログと delta 更新は別の型で扱う。
+    """
+    with pytest.raises(ValueError, match="the document is a delta update"):
+        Catalog.parse(ADD_AUDIO)
+
+
+def test_catalog_apply_delta_adds_a_track() -> None:
+    """
+    delta 更新を適用してトラックを追加できることを確認する。
+
+    操作は配列順に適用される (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+    """
+    catalog = Catalog.parse(ONE_TRACK_CATALOG)
+
+    catalog.apply_delta(ADD_AUDIO)
+
+    assert [track["name"] for track in catalog.tracks] == ["video", "audio"]
+
+
+def test_catalog_apply_delta_rejects_a_full_catalog_document() -> None:
+    """
+    delta 更新を期待する `apply_delta` に完全カタログを渡した場合に拒否することを確認する。
+    """
+    catalog = Catalog.parse(MINIMAL_CATALOG)
+
+    with pytest.raises(ValueError, match="expected a delta update document"):
+        catalog.apply_delta(ONE_TRACK_CATALOG)
+
+
+def test_catalog_apply_delta_rejects_add_to_a_complete_catalog() -> None:
+    """
+    isComplete が真のカタログへのトラック追加を拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.1.3 (Is Complete): "no new tracks will be added to
+    the catalog" である。
+    """
+    catalog = Catalog.parse('{"version":"draft-01","isComplete":true,"tracks":[]}')
+
+    with pytest.raises(ValueError, match="catalog is complete"):
+        catalog.apply_delta(ADD_AUDIO)
+
+
+def test_catalog_apply_delta_finds_tracks_by_the_catalog_namespace() -> None:
+    """
+    カタログのネームスペースを省略したトラック参照を解決することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.2 (Track namespace): トラックが namespace を
+    省略した場合はカタログトラック自身のネームスペースを継承する。
+    """
+    catalog = Catalog.parse(
+        '{"version":"draft-01","tracks":'
+        '[{"name":"video","namespace":"ns","packaging":"loc","isLive":true}]}'
+    )
+    remove = '{"deltaUpdate":[{"op":"remove","tracks":[{"name":"video"}]}]}'
+
+    catalog.apply_delta(remove, "ns")
+
+    assert catalog.tracks == []
+
+
+def test_catalog_apply_delta_reports_a_track_that_cannot_be_resolved() -> None:
+    """
+    ネームスペースを与えなければ解決できないトラック参照を拒否することを確認する。
+
+    同じカタログでも `namespace` を渡すかどうかで参照の解決結果が変わる。
+    """
+    catalog = Catalog.parse(
+        '{"version":"draft-01","tracks":'
+        '[{"name":"video","namespace":"ns","packaging":"loc","isLive":true}]}'
+    )
+    remove = '{"deltaUpdate":[{"op":"remove","tracks":[{"name":"video"}]}]}'
+
+    with pytest.raises(ValueError, match="delta remove: track 'video' not found"):
+        catalog.apply_delta(remove)
+
+
+def test_catalog_apply_delta_leaves_earlier_operations_applied_on_failure() -> None:
+    """
+    delta 更新が途中で失敗しても先行する操作が取り消されないことを確認する。
+
+    draft-ietf-moq-msf-01 §5.1.6 (Delta update) の操作は逐次適用され、
+    ロールバックは規定されていない。適用前の状態を保ちたい場合の判断材料になる。
+    """
+    catalog = Catalog.parse(MINIMAL_CATALOG)
+    # 1 件目の add は成功し、2 件目の remove は存在しないトラックを指す
+    delta = (
+        '{"deltaUpdate":['
+        '{"op":"add","tracks":[{"name":"video","packaging":"loc","isLive":true}]},'
+        '{"op":"remove","tracks":[{"name":"missing"}]}]}'
+    )
+
+    with pytest.raises(ValueError, match="delta remove: track 'missing' not found"):
+        catalog.apply_delta(delta)
+
+    assert [track["name"] for track in catalog.tracks] == ["video"]
+
+
+def test_delta_update_reads_its_operations() -> None:
+    """
+    delta 更新の操作列を draft のフィールド名で読み出せることを確認する。
+
+    操作の種別は `op`、対象のトラックは `tracks` に入る。
+    """
+    delta = DeltaUpdate.parse(ADD_AUDIO)
+
+    assert delta.operations == {
+        "deltaUpdate": [
+            {"op": "add", "tracks": [{"name": "audio", "packaging": "loc", "isLive": True}]}
+        ]
+    }
+    assert delta.generated_at is None
+
+
+def test_delta_update_rejects_a_full_catalog_document() -> None:
+    """
+    完全カタログの文書を `DeltaUpdate` で読もうとした場合に拒否することを確認する。
+    """
+    with pytest.raises(ValueError, match="the document is a full catalog"):
+        DeltaUpdate.parse(MINIMAL_CATALOG)
+
+
+def test_delta_update_rejects_an_empty_operation_list() -> None:
+    """
+    操作が 1 件も無い delta 更新を拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+    """
+    with pytest.raises(ValueError, match="delta update MUST contain at least one operation"):
+        DeltaUpdate.parse('{"deltaUpdate":[]}')
+
+
+def test_media_timeline_round_trips() -> None:
+    """
+    メディアタイムラインが encode と decode で往復することを確認する。
+
+    フォーマットは `[[pts_ms, [group_id, object_id], wallclock_ms], ...]` である。
+    (draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload))
+    """
+    timeline = MediaTimeline()
+    timeline.add(1000, 1, 2, 0)
+    timeline.add(1040, 1, 3, 1234)
+
+    encoded = timeline.encode()
+    decoded = MediaTimeline.decode(encoded)
+
+    assert encoded == b"[[1000,[1,2],0],[1040,[1,3],1234]]"
+    assert decoded.entries == [(1000, 1, 2, 0), (1040, 1, 3, 1234)]
+    assert len(decoded) == 2
+    assert decoded == timeline
+
+
+def test_media_timeline_round_trips_through_gzip() -> None:
+    """
+    gzip で圧縮したメディアタイムラインを decode が自動展開することを確認する。
+
+    (draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload))
+    """
+    timeline = MediaTimeline()
+    timeline.add(1000, 1, 2, 0)
+
+    compressed = timeline.encode(gzip=True)
+
+    # gzip の magic number で圧縮されていることを確認する (RFC 1952 §2.3.1)。
+    assert compressed[:2] == b"\x1f\x8b"
+    assert MediaTimeline.decode(compressed).entries == [(1000, 1, 2, 0)]
+
+
+def test_media_timeline_rejects_a_malformed_document() -> None:
+    """
+    メディアタイムラインとして不正な JSON を拒否することを確認する。
+
+    エントリは 3 要素の配列でなければならない。
+    """
+    with pytest.raises(ValueError, match="invalid MSF catalog"):
+        MediaTimeline.decode(b"[[1000]]")
+
+
+def test_event_timeline_round_trips() -> None:
+    """
+    イベントタイムラインが encode と decode で往復することを確認する。
+
+    エントリは `l` (Location) / `t` (wallclock ms) / `m` (media PTS ms) の
+    いずれか 1 つと `data` を持つ。
+    (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
+    """
+    timeline = EventTimeline()
+    timeline.add_location(1, 2, '{"kind":"a"}')
+    timeline.add_wallclock(99, '{"kind":"b"}')
+    timeline.add_media_pts(5, '{"kind":"c"}')
+
+    encoded = timeline.encode()
+    decoded = EventTimeline.decode(encoded)
+
+    assert decoded.entries == [
+        {"l": [1, 2], "data": {"kind": "a"}},
+        {"t": 99, "data": {"kind": "b"}},
+        {"m": 5, "data": {"kind": "c"}},
+    ]
+    assert len(decoded) == 3
+    assert decoded == timeline
+
+
+def test_event_timeline_round_trips_through_gzip() -> None:
+    """
+    gzip で圧縮したイベントタイムラインを decode が自動展開することを確認する。
+    """
+    timeline = EventTimeline()
+    timeline.add_wallclock(99, '{"kind":"b"}')
+
+    compressed = timeline.encode(gzip=True)
+
+    assert compressed[:2] == b"\x1f\x8b"
+    assert EventTimeline.decode(compressed).entries == [{"t": 99, "data": {"kind": "b"}}]
+
+
+def test_event_timeline_rejects_data_that_is_not_a_json_object() -> None:
+    """
+    エントリの `data` が JSON object でない場合に拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §8.1 (Event Timeline data format))
+    """
+    timeline = EventTimeline()
+    timeline.add_location(1, 2, "null")
+
+    with pytest.raises(ValueError, match="event data MUST be a JSON object"):
+        timeline.encode()
+
+
+def test_uri_splits_the_track_identifier() -> None:
+    """
+    MSF URI の fragment からネームスペースと Track 名を取り出すことを確認する。
+
+    ネームスペースの要素は `-`、Track 名は `--` で区切る。
+    (draft-ietf-moq-msf-01 §11.1.2 (MSF Namespace-Name String Encoding))
+    """
+    uri = Uri.parse("moqt://example.com/live#msf:room-1--video")
+
+    assert uri.authority == "example.com"
+    assert uri.path == "/live"
+    assert uri.query is None
+    assert uri.namespace == [b"room", b"1"]
+    assert uri.track_name == b"video"
+
+
+def test_uri_keeps_the_query_separate_from_the_fragment() -> None:
+    """
+    `?` 以降の query が fragment と混ざらないことを確認する。
+
+    (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+    """
+    uri = Uri.parse("moqt://example.com/live?token=abc#msf:ns--video")
+
+    assert uri.query == "token=abc"
+    assert uri.namespace == [b"ns"]
+    assert uri.track_name == b"video"
+
+
+def test_uri_reads_reserved_fragment_parameters() -> None:
+    """
+    fragment の予約パラメータを型付きで取り出せることを確認する。
+
+    draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の
+    connection / wallclock-range / mediatime-range / location-range を検証する。
+    """
+    uri = Uri.parse(
+        "moqt://example.com/live#msf:ns--video"
+        "&connection=wt&connection=q"
+        "&wallclock-range=10-20&mediatime-range=30-&location-range=1.2-3"
+    )
+
+    assert uri.parameters[0] == ("connection", "wt")
+    assert uri.connection_types() == ["webtransport", "quic"]
+    assert uri.wallclock_ranges() == [(10, 20)]
+    # 終端を省略した range は open range として `None` になる。
+    assert uri.mediatime_ranges() == [(30, None)]
+    assert uri.location_ranges() == [
+        {"start_group_id": 1, "start_object_id": 2, "end_group_id": 3, "end_object_id": None}
+    ]
+    assert uri.parameter_values("connection") == ["wt", "q"]
+
+
+def test_uri_rejects_a_uri_without_a_fragment() -> None:
+    """
+    fragment を持たない URI を拒否することを確認する。
+
+    `#` 以降が無いと Track を特定できない。
+    """
+    with pytest.raises(ValueError, match="MSF URI is missing a fragment"):
+        Uri.parse("moqt://example.com/live")
+
+
+def test_uri_rejects_a_scheme_other_than_moqt() -> None:
+    """
+    `moqt://` 以外の scheme を拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
+    """
+    with pytest.raises(ValueError, match="MSF URI must use the 'moqt://' scheme"):
+        Uri.parse("https://example.com/live#msf:ns--video")
+
+
+def test_uri_rejects_a_fragment_without_the_msf_prefix() -> None:
+    """
+    fragment が `msf:` で始まらない場合に拒否することを確認する。
+    """
+    with pytest.raises(ValueError, match="MSF fragment must start with 'msf:'"):
+        Uri.parse("moqt://example.com/live#ns--video")
+
+
+def test_uri_rejects_a_track_identifier_without_a_separator() -> None:
+    """
+    Track 名の区切り (`--`) が無い識別子を拒否することを確認する。
+
+    区切りが無いとネームスペースと Track 名を分けられない。
+    """
+    with pytest.raises(ValueError, match="MissingSeparator"):
+        Uri.parse("moqt://example.com/live#msf:video")
+
+
+def test_parse_fragment_pairs_keeps_the_order_and_duplicates() -> None:
+    """
+    fragment を `&` 区切りのパラメータ列として分解することを確認する。
+
+    同名のパラメータは出現順に並ぶ。
+    (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))
+    """
+    assert msf.parse_fragment_pairs("a=1&b=2&a=3") == [("a", "1"), ("b", "2"), ("a", "3")]
+
+
+def test_resolve_catalog_variables_substitutes_fragment_values() -> None:
+    """
+    カタログ中の変数参照を fragment のパラメータで置き換えることを確認する。
+
+    (draft-ietf-moq-msf-01 §5.4 (Catalog variables))
+    """
+    document = (
+        b'{"version":"draft-01","tracks":[{"name":"%name%","packaging":"loc","isLive":true}]}'
+    )
+
+    resolved = msf.resolve_catalog_variables(document, "msf:ns--catalog&name=video")
+
+    assert b'"name":"video"' in resolved
+    assert Catalog.decode(resolved).tracks == [
+        {"name": "video", "packaging": "loc", "isLive": True}
+    ]

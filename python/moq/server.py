@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 を利用する MoQT server。"""
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging
@@ -11,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from webtransport import h3
 
-from moqt._runtime import (
+from moq._runtime import (
     TICK_INTERVAL,
     MessageBody,
     MoqtError,
@@ -197,8 +195,15 @@ class Publication:
         subgroup_id: int | None = None,
         publisher_priority: int | None = None,
         end_of_group: bool = False,
+        status: int | None = None,
     ) -> None:
-        """subgroup ストリームでオブジェクトを送信する。"""
+        """subgroup ストリームでオブジェクトを送信する。
+
+        `status` に `moq.moqt.OBJECT_STATUS_END_OF_GROUP` や
+        `moq.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
+        オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
+        (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
+        """
         await self.runtime.send_subgroup_object(
             self.request_id,
             self.track_alias,
@@ -208,6 +213,7 @@ class Publication:
             subgroup_id=subgroup_id,
             publisher_priority=publisher_priority,
             end_of_group=end_of_group,
+            status=status,
         )
 
     async def send_datagram(
@@ -218,8 +224,17 @@ class Publication:
         *,
         publisher_priority: int | None = None,
         properties_data: bytes | None = None,
+        status: int | None = None,
     ) -> None:
-        """オブジェクトデータグラムを送信する。"""
+        """オブジェクトデータグラムを送信する。
+
+        `status` の扱いは `send_object` と同じである。
+
+        データグラムの合計サイズが `moq.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
+        記録する。上限は経路 MTU に依存し、超えたデータグラムは通知なく破棄される
+        (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。大きいオブジェクトは
+        subgroup ストリームで送ること。
+        """
         await self.runtime.send_object_datagram(
             self.request_id,
             group_id,
@@ -227,6 +242,7 @@ class Publication:
             payload,
             publisher_priority,
             properties_data,
+            status,
         )
 
     async def close(self, status_code: int = PUBLISH_DONE_TRACK_ENDED, reason: str = "") -> None:
@@ -255,7 +271,7 @@ class Server:
         certfile: str,
         keyfile: str,
         allowed_origins: list[str] | None = None,
-        implementation: str = "moqt-py",
+        implementation: str = "moq-py",
     ) -> None:
         self._transport = h3.Server(
             host=host,

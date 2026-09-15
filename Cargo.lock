@@ -44,8 +44,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "moqt-py"
-version = "0.1.0"
+name = "moq-py"
+version = "2026.0.0"
 dependencies = [
  "pyo3",
  "shiguredo_moqt",
@@ -59,9 +59,9 @@ checksum = "51d9d86fb4334e807657ff3f88c4faa1d5d81bd65027e18ea1e5885710d5f78d"
 
 [[package]]
 name = "nojson"
-version = "0.3.12"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e75dfcef0ca5529a58a350e6b80783c98521a70f73fb1c4f0d4b661ba892d766"
+checksum = "1d7473c448719d0214889f9ff75d4cdb6cf96582e4a9058e6eb2a52dc8d342ae"
 
 [[package]]
 name = "once_cell"
@@ -153,7 +153,7 @@ dependencies = [
 [[package]]
 name = "shiguredo_moqt"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/moqt-rs.git?rev=5ddd5142b728f2bac2120827cc85bbb183c234c6#5ddd5142b728f2bac2120827cc85bbb183c234c6"
+source = "git+https://github.com/shiguredo/moqt-rs.git?branch=develop#d3b00b237017198d2199239b6c3b14eefce6921a"
 dependencies = [
  "hashbrown",
  "noflate",

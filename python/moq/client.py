@@ -1,7 +1,5 @@
 """WebTransport over HTTP/3 を利用する MoQT client。"""
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging
@@ -11,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from webtransport import h3
 
-from moqt._runtime import (
+from moq._runtime import (
     TICK_INTERVAL,
     MessageBody,
     MoqtError,
@@ -42,6 +40,13 @@ class MoqtObject:
 
     payload: bytes
     """オブジェクトのペイロード。"""
+
+    status: int | None = None
+    """Object Status。
+
+    ペイロード長 0 のオブジェクトだけが持ち、非 0 長では `None` になる。
+    (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
+    """
 
 
 @dataclass(slots=True)
@@ -196,7 +201,7 @@ class Client:
         verify_peer: bool = True,
         origin: str = "",
         ca_file: str | None = None,
-        implementation: str = "moqt-py",
+        implementation: str = "moq-py",
     ) -> None:
         self._transport = h3.Client(
             url=url,
@@ -483,6 +488,7 @@ class Client:
                         group_id=event.group_id or 0,
                         object_id=event.object_id or 0,
                         payload=payload,
+                        status=event.status,
                     )
                 )
             return
@@ -495,6 +501,7 @@ class Client:
                 group_id=event.group_id or 0,
                 object_id=event.object_id or 0,
                 payload=payload,
+                status=event.status,
             )
         )
 

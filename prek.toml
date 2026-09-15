@@ -71,6 +71,6 @@ id = "pytest"
 name = "pytest"
 language = "system"
 entry = "uv run pytest"
-files = "^(python|src|tests)/"
+files = "^(python|src|tests)/|^conftest\\.py$"
 pass_filenames = false
 stages = ["pre-push"]

@@ -1,19 +1,17 @@
 """MoQT セッションと WebTransport ストリームを接続する内部ランタイム。
 
-このモジュールは公開 API ではない。`moqt.client` と `moqt.server` が共通で使う
+このモジュールは公開 API ではない。`moq.client` と `moq.server` が共通で使う
 ストリーム振り分けとイベント処理をまとめる。
 
 役割分担は次のとおりである。
 
 - `webtransport.h3` がストリームとデータグラムの I/O を担当する
-- `moqt._native` が MoQT のプロトコル状態機械とメッセージのデコードを担当する
+- `moq._native` が MoQT のプロトコル状態機械とメッセージのデコードを担当する
 - このランタイムが両者を接続し、ストリーム ID と Request ID の対応を保持する
 
 応答メッセージはワイヤに Request ID を含まないため、ストリームと Request ID の
 対応を I/O 層が保持する必要がある (draft-ietf-moq-transport-21 §9.4 (REQUEST_ERROR))。
 """
-
-from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -21,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from moqt import _native
+from moq import _native, moqt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -33,7 +31,7 @@ MessageBody = dict[str, object]
 
 
 class NativeEvent(Protocol):
-    """`moqt._native` が返すイベントの構造。
+    """`moq._native` が返すイベントの構造。
 
     ネイティブ拡張の型を Python 側で再定義せずに型検査を通すため、
     必要な属性だけを構造として表す。
@@ -90,6 +88,11 @@ class NativeEvent(Protocol):
         ...
 
     @property
+    def status(self) -> int | None:
+        """オブジェクトの Object Status (ペイロード長 0 の場合のみ)。"""
+        ...
+
+    @property
     def acceptance(self) -> str | None:
         """オブジェクトの受理結果。"""
         ...
@@ -110,15 +113,12 @@ class NativeEvent(Protocol):
         ...
 
 
-# ストリーム種別 (draft-ietf-moq-transport-21 §6.4.1 (Unidirectional Streams) Table 3)
-SETUP_STREAM_TYPE: int = _native.SETUP_STREAM_TYPE
-FETCH_HEADER_TYPE: int = _native.FETCH_HEADER_TYPE
-PADDING_STREAM_TYPE: int = _native.PADDING_STREAM_TYPE
-PADDING_DATAGRAM_TYPE: int = _native.PADDING_DATAGRAM_TYPE
-
-# SUBSCRIBER_PRIORITY の既定値
-# (draft-ietf-moq-transport-21 §9.20.6 (SUBSCRIBER_PRIORITY Parameter))
-DEFAULT_SUBSCRIBER_PRIORITY = 128
+# ストリーム種別とパラメータの既定値はプロトコル層の定義をそのまま使う
+SETUP_STREAM_TYPE = moqt.SETUP_STREAM_TYPE
+FETCH_HEADER_TYPE = moqt.FETCH_HEADER_TYPE
+PADDING_STREAM_TYPE = moqt.PADDING_STREAM_TYPE
+PADDING_DATAGRAM_TYPE = moqt.PADDING_DATAGRAM_TYPE
+DEFAULT_SUBSCRIBER_PRIORITY = moqt.DEFAULT_SUBSCRIBER_PRIORITY
 
 # セッションのタイムアウト判定間隔 (秒)
 TICK_INTERVAL = 0.1
@@ -235,12 +235,28 @@ class SubgroupWriter:
     """送信中の subgroup ストリーム 1 本の状態。
 
     Object ID は subgroup ストリーム内で差分として表現されるため、
-    直前の Object ID を保持する (draft-ietf-moq-transport-21 §11.3.2)。
+    直前の Object ID を保持する (draft-ietf-moq-transport-21 §11.3.1)。
     """
 
     stream_id: int
     group_id: int
     last_object_id: int | None = None
+
+
+@dataclass(slots=True)
+class FetchWriter:
+    """送信中の fetch ストリーム 1 本の状態。
+
+    fetch ストリームの Group ID と Object ID は直前のオブジェクトを基準に
+    差分で表現されるため、直前の値を保持する
+    (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。
+    """
+
+    stream_id: int
+    last_group_id: int | None = None
+    last_object_id: int | None = None
+    last_subgroup_id: int | None = None
+    last_publisher_priority: int | None = None
 
 
 @dataclass(slots=True)
@@ -263,9 +279,9 @@ class Runtime:
         on_task_error: Callable[[BaseException], Awaitable[None]] | None = None,
     ) -> None:
         self._core = (
-            _native._CoreSession.client(implementation)
+            _native.Session.client(implementation)
             if client
-            else _native._CoreSession.server(implementation)
+            else _native.Session.server(implementation)
         )
         self._ops = ops
         self._events = events
@@ -285,6 +301,8 @@ class Runtime:
         self._data_stream_types: dict[int, int] = {}
         # 自側が開始した subgroup ストリームの送信状態 (Request ID 索引)
         self._subgroups: dict[int, SubgroupWriter] = {}
+        # 自側が開いた fetch stream の送信状態 (stream ID 索引)
+        self._fetch_streams: dict[int, FetchWriter] = {}
         self._closed = False
 
     # ─── 状態 ───────────────────────────────────────────────
@@ -502,6 +520,7 @@ class Runtime:
         await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
+        self._fetch_streams[stream_id] = FetchWriter(stream_id=stream_id)
         return stream_id
 
     async def send_fetch_stream_object(
@@ -515,15 +534,27 @@ class Runtime:
         subgroup_id: int = 0,
     ) -> None:
         """開いた fetch stream へオブジェクトを書き込む。"""
-        await self._apply_events(self._core.send_fetch_object(stream_id))
-        await self._ops.send_stream_data(
-            stream_id,
-            _encode_fetch_object(group_id, object_id, payload, publisher_priority, subgroup_id),
-            False,
+        writer = self._fetch_streams.get(stream_id)
+        if writer is None:
+            raise MoqtError(f"fetch stream {stream_id} is not open")
+        data = _encode_fetch_object(
+            writer,
+            group_id,
+            object_id,
+            payload,
+            publisher_priority,
+            subgroup_id,
         )
+        await self._apply_events(self._core.send_fetch_object(stream_id))
+        await self._ops.send_stream_data(stream_id, data, False)
+        writer.last_group_id = group_id
+        writer.last_object_id = object_id
+        writer.last_subgroup_id = subgroup_id
+        writer.last_publisher_priority = publisher_priority
 
     async def close_fetch_stream(self, stream_id: int) -> None:
         """fetch stream を終了する。"""
+        self._fetch_streams.pop(stream_id, None)
         await self._ops.send_stream_data(stream_id, b"", True)
         await self._apply_events(self._core.send_fetch_data_stream_closed(stream_id))
 
@@ -672,13 +703,22 @@ class Runtime:
         subgroup_id: int | None = None,
         publisher_priority: int | None = None,
         end_of_group: bool = False,
+        status: int | None = None,
     ) -> None:
         """subgroup ストリームでオブジェクトを送信する。
 
         同じ Request ID と Group ID のストリームが既にあれば再利用する。
         Object ID はストリーム内で差分として表現されるため、直前の値との差を書く。
         """
+        # 状態を進める前にバイト列を組み立て、不正な組み合わせでは送信も状態更新もしない
         writer = self._subgroups.get(request_id)
+        delta = (
+            object_id
+            if writer is None or writer.last_object_id is None
+            else object_id - writer.last_object_id - 1
+        )
+        data = _encode_subgroup_object(delta, payload, status)
+
         if writer is None or writer.group_id != group_id:
             if writer is not None:
                 await self._finish_subgroup_writer(request_id, writer)
@@ -698,13 +738,8 @@ class Runtime:
             # ローカルのフィルタで破棄するオブジェクトは送信しない
             return
 
-        delta = (
-            object_id if writer.last_object_id is None else object_id - writer.last_object_id - 1
-        )
         writer.last_object_id = object_id
-        await self._ops.send_stream_data(
-            writer.stream_id, _encode_subgroup_object(delta, payload), False
-        )
+        await self._ops.send_stream_data(writer.stream_id, data, False)
 
     async def _open_subgroup(
         self,
@@ -764,18 +799,13 @@ class Runtime:
         payload: bytes,
         publisher_priority: int | None = None,
         properties_data: bytes | None = None,
+        status: int | None = None,
     ) -> None:
         """オブジェクトデータグラムを送信する。"""
         track_alias = self._core.subscription_track_alias(request_id)
         if track_alias is None:
             raise MoqtError(f"subscription {request_id} has no track alias")
-        allowed, events = self._core.send_object_datagram(
-            request_id, group_id, object_id, properties_data, None
-        )
-        await self._apply_events(events)
-        if not allowed:
-            # ローカルのフィルタで破棄するオブジェクトは送信しない
-            return
+        # 状態機械へ通知する前にバイト列を組み立て、不正な組み合わせでは送信しない
         datagram = _encode_object_datagram(
             track_alias,
             group_id,
@@ -783,7 +813,26 @@ class Runtime:
             payload,
             publisher_priority,
             properties_data=properties_data,
+            status=status,
         )
+        if len(datagram) > moqt.MAX_DATAGRAM_SIZE:
+            # 上限を超えたデータグラムは経路によっては通知なく破棄され、送信側から
+            # 検知できない (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+            # 原因が分からないまま受信待ちで止まらないよう、送信前に警告する
+            logger.warning(
+                "MoQT datagram size %d exceeds the portable limit %d; "
+                "it may be dropped by the path without notification. "
+                "Use a subgroup stream for larger objects.",
+                len(datagram),
+                moqt.MAX_DATAGRAM_SIZE,
+            )
+        allowed, events = self._core.send_object_datagram(
+            request_id, group_id, object_id, properties_data, None
+        )
+        await self._apply_events(events)
+        if not allowed:
+            # ローカルのフィルタで破棄するオブジェクトは送信しない
+            return
         await self._ops.send_datagram(datagram)
 
     # ─── ストリーム種別の判定 ───────────────────────────────
@@ -934,11 +983,11 @@ class Runtime:
             stream_id = await self._ops.open_uni_stream()
             if stream_id >= 0:
                 await self._ops.send_stream_data(
-                    stream_id, _encode_varint(PADDING_STREAM_TYPE) + bytes(length), True
+                    stream_id, moqt.encode_varint(PADDING_STREAM_TYPE) + bytes(length), True
                 )
         elif event.kind == "send_padding_datagram":
             length = _message_int(event, "length")
-            await self._ops.send_datagram(_encode_varint(PADDING_DATAGRAM_TYPE) + bytes(length))
+            await self._ops.send_datagram(moqt.encode_varint(PADDING_DATAGRAM_TYPE) + bytes(length))
 
     async def _handle_object(self, event: NativeEvent) -> None:
         """受信したオブジェクトをアプリケーションへ通知する。"""
@@ -955,7 +1004,9 @@ class Runtime:
 
     async def _handle_message_event(self, kind: str, event: NativeEvent) -> None:
         """アプリケーションへ通知するイベントを振り分ける。"""
-        if kind == "request_ok":
+        if kind in {"request_ok", "fetch_ok"}:
+            # FETCH_OK は request の応答だが、状態機械は request_ok ではなく
+            # fetch_ok として通知する。どちらも待っている request を解決する。
             await self._resolve_request(event)
             await self._notify(self._events.on_request_ok, event)
         elif kind == "request_error":
@@ -1086,54 +1137,14 @@ def _is_bidirectional(stream_id: int) -> bool:
     return stream_id & 0b10 == 0
 
 
-def _encode_varint(value: int) -> bytes:
-    """vi64 をエンコードする (draft-ietf-moq-transport-21 §8.1)。"""
-    if value < 0:
-        raise ValueError(f"varint must not be negative: {value}")
-    if value < 1 << 6:
-        return bytes([value])
-    if value < 1 << 14:
-        return (value | 0x4000).to_bytes(2, "big")
-    if value < 1 << 30:
-        return (value | 0x8000_0000).to_bytes(4, "big")
-    if value < 1 << 62:
-        return (value | 0xC000_0000_0000_0000).to_bytes(8, "big")
-    raise ValueError(f"varint is out of range: {value}")
-
-
-def _varint_length(first: int) -> int:
-    """先頭バイトから vi64 のエンコード長を返す。"""
-    if first == 0xFF:
-        return 9
-    length = 1
-    while length < 8 and first & (0x80 >> (length - 1)):
-        length += 1
-    return length
-
-
 def _decode_first_varint(data: bytes) -> int | None:
-    """先頭の vi64 をデコードする。途中で切れている場合は `None` を返す。
+    """先頭の vi64 の値だけを返す。途中で切れている場合は `None` を返す。
 
-    先頭バイトの leading-1-bits がエンコード長を決める
-    (draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers))。
-    非最小エンコーディングも受理する。
+    vi64 のデコードは `moq.moqt` が担う。ストリーム種別の判定では値だけが必要で、
+    未完成かどうかは `None` で表す。
     """
-    if not data:
-        return None
-    first = data[0]
-    if first == 0xFF:
-        # 9 バイト表現は先頭バイトが 0xFF で、残り 8 バイトが値である
-        if len(data) < 9:
-            return None
-        return int.from_bytes(data[1:9], "big")
-
-    length = 1
-    while length < 8 and first & (0x80 >> (length - 1)):
-        length += 1
-    if len(data) < length:
-        return None
-    # 先頭バイトのタグを除いた値は、エンコード長全体の下位ビットである
-    return int.from_bytes(data[:length], "big") & ((1 << (7 * length)) - 1)
+    decoded = moqt.decode_varint_prefix(data)
+    return None if decoded is None else decoded[0]
 
 
 def _subgroup_type_byte(
@@ -1146,13 +1157,15 @@ def _subgroup_type_byte(
 ) -> int:
     """subgroup ヘッダの type byte を組み立てる (draft-ietf-moq-transport-21 §11.3.1)。
 
-    bit 4 は常に 1 でなければならない。呼び出し側は 0x10 を含めない。
+    bit 4 (0x10) は常に 1 でなければならない。SUBGROUP_ID_MODE は bits 1-2
+    (mask 0x06) の 2 bit であり、Subgroup ID を明示する場合は 0b10 を置く。
     """
     type_byte = 0x10
     if has_properties:
         type_byte |= 0x01
     if subgroup_id is not None:
-        type_byte |= 0x02
+        # SUBGROUP_ID_MODE = 0b10 (Subgroup ID フィールドが存在する)
+        type_byte |= 0x04
     if end_of_group:
         type_byte |= 0x08
     if default_priority:
@@ -1179,11 +1192,11 @@ def _encode_subgroup_header(
         default_priority=publisher_priority is None,
     )
     header = bytearray()
-    header += _encode_varint(type_byte)
-    header += _encode_varint(track_alias)
-    header += _encode_varint(group_id)
+    header += moqt.encode_varint(type_byte)
+    header += moqt.encode_varint(track_alias)
+    header += moqt.encode_varint(group_id)
     if subgroup_id is not None:
-        header += _encode_varint(subgroup_id)
+        header += moqt.encode_varint(subgroup_id)
     if publisher_priority is not None:
         header.append(publisher_priority)
     return bytes(header)
@@ -1195,12 +1208,13 @@ def _encode_fetch_header(request_id: int) -> bytes:
     ストリーム先頭の stream type (0x05) と Request ID を並べる。
     """
     body = bytearray()
-    body += _encode_varint(FETCH_HEADER_TYPE)
-    body += _encode_varint(request_id)
+    body += moqt.encode_varint(FETCH_HEADER_TYPE)
+    body += moqt.encode_varint(request_id)
     return bytes(body)
 
 
 def _encode_fetch_object(
+    writer: FetchWriter,
     group_id: int,
     object_id: int,
     payload: bytes,
@@ -1208,37 +1222,93 @@ def _encode_fetch_object(
     subgroup_id: int,
 ) -> bytes:
     """fetch stream のオブジェクトをエンコードする
-    (draft-ietf-moq-transport-21 §11.4.2)。
+    (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。
 
-    先頭のオブジェクトは Group ID / Subgroup ID / Object ID / Publisher Priority を
-    すべて明示する。
+    Group ID と Object ID の表現は直前のオブジェクトに依存する。
+
+    - 先頭のオブジェクト: どちらも絶対値
+    - Group が変わるとき: Group ID は差分 (`今回 - 前回 - 1`)、Object ID は絶対値
+    - 同じ Group のとき: Group ID は省略 (前回を継承)、Object ID は差分 (`今回 - 前回`)
+
+    Object ID の差分に +1 は付かない (subgroup とは異なる)。
     """
     flags = 0x03  # Subgroup ID: Explicit
-    flags |= 0x04  # Object ID あり
-    flags |= 0x08  # Group ID あり
-    flags |= 0x10  # Publisher Priority あり
+    fields = bytearray()
+    if writer.last_group_id is None or writer.last_object_id is None:
+        flags |= 0x08  # Group ID Delta あり (先頭は絶対値)
+        flags |= 0x04  # Object ID Delta あり (Group 変更時は絶対値)
+        fields += moqt.encode_varint(group_id)
+        fields += moqt.encode_varint(subgroup_id)
+        fields += moqt.encode_varint(object_id)
+    elif group_id != writer.last_group_id:
+        flags |= 0x08
+        flags |= 0x04
+        fields += moqt.encode_varint(group_id - writer.last_group_id - 1)
+        fields += moqt.encode_varint(subgroup_id)
+        fields += moqt.encode_varint(object_id)
+    else:
+        # Group ID を省略すると直前の Group ID を継承する
+        flags |= 0x04
+        fields += moqt.encode_varint(subgroup_id)
+        fields += moqt.encode_varint(object_id - writer.last_object_id)
+
+    flags |= 0x10  # Publisher Priority
     body = bytearray()
-    body += _encode_varint(flags)
-    body += _encode_varint(group_id)
-    body += _encode_varint(subgroup_id)
-    body += _encode_varint(object_id)
+    body += moqt.encode_varint(flags)
+    body += fields
     body.append(publisher_priority)
-    body += _encode_varint(len(payload))
+    body += moqt.encode_varint(len(payload))
     body += payload
     return bytes(body)
 
 
-def _encode_subgroup_object(object_id_delta: int, payload: bytes) -> bytes:
+def _object_status_to_write(status: int | None, payload: bytes) -> int | None:
+    """Object Status フィールドに書く値を決める。
+
+    ペイロード長 0 のオブジェクトは Object Status を明示しなければならない。
+    非 0 長のオブジェクトは Normal 以外の status を持てない
+    (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
+
+    Returns:
+        書くべき status。フィールドを書かない場合は `None`。
+    """
+    if status is None:
+        return None if payload else moqt.OBJECT_STATUS_NORMAL
+    if status not in (
+        moqt.OBJECT_STATUS_NORMAL,
+        moqt.OBJECT_STATUS_END_OF_GROUP,
+        moqt.OBJECT_STATUS_END_OF_TRACK,
+    ):
+        raise MoqtError(f"unknown object status: {status:#x}")
+    if payload:
+        if status != moqt.OBJECT_STATUS_NORMAL:
+            raise MoqtError(
+                f"object status {status:#x} requires an empty payload, got {len(payload)} bytes"
+            )
+        # Normal は非 0 長のオブジェクトでは暗黙でありフィールドを書かない
+        return None
+    return status
+
+
+def _encode_subgroup_object(
+    object_id_delta: int,
+    payload: bytes,
+    status: int | None = None,
+) -> bytes:
     """subgroup オブジェクトをエンコードする。
 
     `object_id_delta` は最初のオブジェクトでは絶対値、以降は
     `(今回の Object ID) - (前回の Object ID) - 1` である
-    (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
     """
+    written = _object_status_to_write(status, payload)
     body = bytearray()
-    body += _encode_varint(object_id_delta)
-    body += _encode_varint(len(payload))
-    body += payload
+    body += moqt.encode_varint(object_id_delta)
+    body += moqt.encode_varint(len(payload))
+    if written is None:
+        body += payload
+    else:
+        body += moqt.encode_varint(written)
     return bytes(body)
 
 
@@ -1251,12 +1321,14 @@ def _encode_object_datagram(
     *,
     properties_data: bytes | None = None,
     end_of_group: bool = False,
+    status: int | None = None,
 ) -> bytes:
     """オブジェクトデータグラムをエンコードする (draft-ietf-moq-transport-21 §11.2.1)。
 
     フィールドの並びは Type Flags、Track Alias、Group ID、Object ID である。
     bit 4 は未定義であり、設定してはならない。
     """
+    written = _object_status_to_write(status, payload)
     type_byte = 0x00
     if properties_data is not None:
         type_byte |= 0x01
@@ -1264,14 +1336,22 @@ def _encode_object_datagram(
         type_byte |= 0x02
     if publisher_priority is None:
         type_byte |= 0x08
+    if written is not None:
+        # データグラムはペイロード長を持たないため、Object Status を運ぶ場合は
+        # STATUS bit を立ててペイロードが無いことを示す
+        # (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+        type_byte |= 0x20
     datagram = bytearray()
-    datagram += _encode_varint(type_byte)
-    datagram += _encode_varint(track_alias)
-    datagram += _encode_varint(group_id)
-    datagram += _encode_varint(object_id)
+    datagram += moqt.encode_varint(type_byte)
+    datagram += moqt.encode_varint(track_alias)
+    datagram += moqt.encode_varint(group_id)
+    datagram += moqt.encode_varint(object_id)
     if publisher_priority is not None:
         datagram.append(publisher_priority)
     if properties_data is not None:
         datagram += properties_data
-    datagram += payload
+    if written is None:
+        datagram += payload
+    else:
+        datagram += moqt.encode_varint(written)
     return bytes(datagram)
