@@ -62,6 +62,78 @@ def _round_trip(
     return client.receive_request_stream(stream_id, _message_data(ok[0]), "local")
 
 
+def _subscribe_round_trip(
+    client: Session,
+    server: Session,
+    stream_id: int,
+    track_alias: int = 1,
+) -> int:
+    """SUBSCRIBE を送り、SUBSCRIBE_OK を受け取るまでを往復させる。"""
+    events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(stream_id, request_id)
+    server.receive_request_stream(stream_id, _message_data(events[0]), "peer")
+    ok = server.send_subscribe_ok(request_id, track_alias, {}, {})
+    client.receive_request_stream(stream_id, _message_data(ok[0]), "local")
+    return request_id
+
+
+def test_request_stream_close_is_reported_for_a_local_request() -> None:
+    """
+    自側が開始した request stream の終端がセッションへ通知されることを確認する。
+
+    状態機械は request を Request ID で識別する。ストリーム ID と Request ID が
+    異なる場合でも、終端の通知を未知の Request ID として拒否してはならない。
+    """
+    client, server = _setup()
+    stream_id = 4
+    request_id = _subscribe_round_trip(client, server, stream_id)
+    assert request_id != stream_id
+
+    # FIN として終端を通知する。未知の Request ID を渡していると PROTOCOL_VIOLATION になる
+    client.receive_request_stream_closed(stream_id, False, None)
+
+
+def test_request_stream_close_is_reported_for_a_peer_request() -> None:
+    """
+    peer が開始した request stream の終端がセッションへ通知されることを確認する。
+
+    自側が開始していない request でも、最初のメッセージが運んだ Request ID で
+    終端を通知しなければならない。
+    """
+    client, server = _setup()
+    stream_id = 4
+    _subscribe_round_trip(client, server, stream_id)
+
+    server.receive_request_stream_closed(stream_id, False, None)
+
+
+def test_request_stream_close_is_ignored_for_an_unknown_stream() -> None:
+    """
+    自側が把握していない request stream の終端を無視することを確認する。
+
+    状態機械もそのストリームを知らないため、通知してはならない。
+    """
+    client, _server = _setup()
+
+    client.receive_request_stream_closed(42, False, None)
+
+
+def test_request_stream_close_is_ignored_after_the_first_notification() -> None:
+    """
+    同じ request stream の終端を 2 回通知しても拒否しないことを確認する。
+
+    状態機械は 2 回目を未知の Request ID として拒否するため、I/O 層が
+    1 回目で対応を破棄して 2 回目を通知しないようにしている。
+    """
+    client, server = _setup()
+    stream_id = 4
+    _subscribe_round_trip(client, server, stream_id)
+
+    client.receive_request_stream_closed(stream_id, False, None)
+    client.receive_request_stream_closed(stream_id, True, 0)
+
+
 # ─── SETUP と制御ストリーム ─────────────────────────────────
 
 

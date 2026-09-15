@@ -4,7 +4,7 @@ import importlib
 import logging
 
 import pytest
-from moq import Client, Fetch, MoqtObject, Subscription, moqt
+from moq import Client, Fetch, MoqtObject, Server, Subscription, moqt
 from moq._runtime import MoqtError
 from moq.server import FetchRequest, Publication, SubscriptionRequest
 from moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
@@ -378,6 +378,29 @@ async def test_datagram_size_is_reported_before_sending(
 
     reported = "exceeds the portable limit" in caplog.text
     assert reported is oversized
+
+
+async def test_server_keeps_serving_after_a_client_closes(
+    moq_server: Server,
+    moq_client_factory: ClientFactory,
+) -> None:
+    """
+    client が接続を閉じたあとも server が新しい接続を受け付けることを確認する。
+
+    接続の終了時には、トランスポートの後始末として制御ストリームや要求ストリームの
+    終端が server へ届く。制御ストリームは session の生存中に閉じてはならないため
+    (draft-ietf-moq-transport-21 §6.4.1 (Control Streams))、これらを状態機械が
+    プロトコル違反として拒否しても server は動き続けなければならない。
+    """
+    first = await moq_client_factory()
+    assert first.established
+
+    await first.close()
+    await wait_until(lambda: not first.established)
+
+    # server が生きていれば SETUP が成立する。動いていなければ接続がタイムアウトする
+    second = await moq_client_factory()
+    assert second.established
 
 
 async def test_fetch_receives_objects(moq_pair: MoqPair) -> None:

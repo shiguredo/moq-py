@@ -376,22 +376,35 @@ class Runtime:
         stream_id: int,
         error_code: int | None = None,
     ) -> None:
-        """WebTransport のストリーム終端を状態機械へ通知する。"""
+        """WebTransport のストリーム終端を状態機械へ通知する。
+
+        トランスポートの終了に伴う終端は、状態機械がプロトコル違反として拒否することが
+        ある。例えば制御ストリームは session の生存中に閉じてはならないため
+        (draft-ietf-moq-transport-21 §6.4.1 (Control Streams))、WebTransport session の
+        終了と前後して届いた FIN は違反として扱われる。これはアプリケーションが
+        対処できる失敗ではないので、例外を送出せずセッションの終了として扱う。
+        """
         info = self._streams.pop(stream_id, None)
         self._data_stream_types.pop(stream_id, None)
         if info is None:
             return
         reset = error_code is not None
-        if info.kind == _STREAM_CONTROL:
-            await self._apply_events(self._core.receive_control_stream_closed(reset, error_code))
-        elif info.kind == _STREAM_REQUEST:
-            await self._apply_events(
-                self._core.receive_request_stream_closed(stream_id, reset, error_code)
-            )
-        else:
-            await self._apply_events(
-                self._core.receive_data_stream_closed(stream_id, reset, error_code)
-            )
+        try:
+            if info.kind == _STREAM_CONTROL:
+                await self._apply_events(
+                    self._core.receive_control_stream_closed(reset, error_code)
+                )
+            elif info.kind == _STREAM_REQUEST:
+                await self._apply_events(
+                    self._core.receive_request_stream_closed(stream_id, reset, error_code)
+                )
+            else:
+                await self._apply_events(
+                    self._core.receive_data_stream_closed(stream_id, reset, error_code)
+                )
+        except Exception as error:
+            logger.debug("MoQT stream close was rejected: stream=%s error=%s", stream_id, error)
+            await self._finish_session(0, str(error))
 
     async def receive_datagram(self, data: bytes) -> None:
         """WebTransport のデータグラムを状態機械へ渡す。"""
@@ -1075,9 +1088,13 @@ class Runtime:
     async def _handle_close(self, event: NativeEvent) -> None:
         """セッション終了を処理する。"""
         logger.debug("MoQT session closed: code=%s reason=%s", event.code, event.reason)
+        await self._finish_session(int(event.code or 0), str(event.reason or ""))
+
+    async def _finish_session(self, code: int, reason: str) -> None:
+        """セッションを終了状態にし、待ち合わせとアプリケーションへ通知する。"""
+        if self._closed:
+            return
         self._closed = True
-        code = int(event.code or 0)
-        reason = str(event.reason or "")
         for pending in self._pending_requests.values():
             if not pending.future.done():
                 pending.future.set_exception(SessionClosedError(code, reason))

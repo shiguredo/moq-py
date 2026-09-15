@@ -957,8 +957,8 @@ impl CoreEvent {
 enum RequestStreamRole {
     /// 自側が開始した request のストリーム。応答はこの Request ID で処理する。
     Local { request_id: u64 },
-    /// peer が開始した request のストリーム。
-    Peer,
+    /// peer が開始した request のストリーム。最初のメッセージが運んだ Request ID を保持する。
+    Peer { request_id: u64 },
 }
 
 /// peer から受信中の data stream のデコーダ。
@@ -1598,8 +1598,19 @@ impl CoreSession {
                         let body = message_body_to_python(py, &message)?;
                         let request_id = message_request_id(&message);
                         self.session.recv_request(message).map_err(runtime_error)?;
-                        self.request_streams
-                            .insert(stream_id, RequestStreamRole::Peer);
+                        // ストリームの終端を状態機械へ通知するときに Request ID が要るため、
+                        // 最初のメッセージが運んだ値を保持する
+                        let stream_request_id = request_id.ok_or_else(|| {
+                            PyValueError::new_err(format!(
+                                "request stream {stream_id} carries a message without a request id"
+                            ))
+                        })?;
+                        self.request_streams.insert(
+                            stream_id,
+                            RequestStreamRole::Peer {
+                                request_id: stream_request_id,
+                            },
+                        );
                         events.push(
                             CoreEvent::with_message(kind, body, raw, request_id, None)
                                 .on_stream(stream_id),
@@ -1639,11 +1650,21 @@ impl CoreSession {
         reliable_size: Option<u64>,
     ) -> PyResult<Vec<CoreEvent>> {
         self.request_buffers.remove(stream_id);
-        self.request_streams.remove(&stream_id);
+        // 状態機械は Request ID で request を識別する。ストリーム ID をそのまま渡すと
+        // 未知の Request ID として PROTOCOL_VIOLATION になる
+        let Some(role) = self.request_streams.remove(&stream_id) else {
+            // 自側が把握していないストリームの終端は状態機械も知らないため通知しない
+            return self.drain_events(py);
+        };
+        let request_id = match role {
+            RequestStreamRole::Local { request_id } | RequestStreamRole::Peer { request_id } => {
+                request_id
+            }
+        };
 
         let end = request_stream_end(reset, error_code, reliable_size)?;
         self.session
-            .recv_request_stream_closed(stream_id, end)
+            .recv_request_stream_closed(request_id, end)
             .map_err(runtime_error)?;
         self.drain_events(py)
     }
