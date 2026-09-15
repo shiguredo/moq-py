@@ -17,6 +17,7 @@ mod core;
 mod errors;
 mod loc;
 mod msf;
+mod properties;
 
 use pyo3::prelude::*;
 
@@ -60,6 +61,10 @@ mod _native {
     // LOC の codec (moqt.loc)
     #[pymodule_export]
     use crate::loc::LocProperties;
+
+    // MOQT の Properties の codec (moqt.moqt)
+    #[pymodule_export]
+    use crate::properties::{ObjectProperties, TrackProperties};
 
     // MSF の codec (moqt.msf)
     #[pymodule_export]
@@ -139,6 +144,7 @@ mod _native {
         // LOC と MSF の定数
         crate::loc::register_constants(module)?;
         crate::msf::register_constants(module)?;
+        crate::properties::register_constants(module)?;
         Ok(())
     }
 }

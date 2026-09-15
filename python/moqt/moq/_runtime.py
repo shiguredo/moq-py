@@ -93,6 +93,26 @@ class NativeEvent(Protocol):
         ...
 
     @property
+    def properties(self) -> bytes | None:
+        """オブジェクトの Properties の生バイト。"""
+        ...
+
+    @property
+    def publisher_priority(self) -> int | None:
+        """データストリームが運ぶ Publisher Priority。"""
+        ...
+
+    @property
+    def subgroup_id(self) -> int | None:
+        """オブジェクトを含む subgroup の Subgroup ID。"""
+        ...
+
+    @property
+    def reliable_size(self) -> int | None:
+        """RESET_STREAM の reliable size。"""
+        ...
+
+    @property
     def acceptance(self) -> str | None:
         """オブジェクトの受理結果。"""
         ...
@@ -239,6 +259,12 @@ class SubgroupWriter:
     stream_id: int
     group_id: int
     last_object_id: int | None = None
+    has_properties: bool = False
+    """ヘッダが Properties を持つか。
+
+    Properties の有無はヘッダで固定されるため、途中のオブジェクトで変更できない
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
 
 
 @dataclass(slots=True)
@@ -691,22 +717,34 @@ class Runtime:
         publisher_priority: int | None = None,
         end_of_group: bool = False,
         status: int | None = None,
+        properties_data: bytes | None = None,
     ) -> None:
         """subgroup ストリームでオブジェクトを送信する。
 
         同じ Request ID と Group ID のストリームが既にあれば再利用する。
         Object ID はストリーム内で差分として表現されるため、直前の値との差を書く。
+
+        `properties_data` を渡す場合、そのストリームの最初のオブジェクトで
+        Properties の有無がヘッダに固定される
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。ヘッダが Properties を
+        持たないストリームへ途中から渡すと `MoqtError` になる。
         """
         # 状態を進める前にバイト列を組み立て、不正な組み合わせでは送信も状態更新もしない
         writer = self._subgroups.get(request_id)
+        opens_stream = writer is None or writer.group_id != group_id
+        if properties_data is not None and not opens_stream and not writer.has_properties:
+            raise MoqtError(
+                f"stream for request {request_id} carries objects without properties; "
+                "properties must be set on the first object of a subgroup"
+            )
         delta = (
             object_id
             if writer is None or writer.last_object_id is None
             else object_id - writer.last_object_id - 1
         )
-        data = _encode_subgroup_object(delta, payload, status)
+        data = _encode_subgroup_object(delta, payload, status, properties_data)
 
-        if writer is None or writer.group_id != group_id:
+        if opens_stream:
             if writer is not None:
                 await self._finish_subgroup_writer(request_id, writer)
             writer = await self._open_subgroup(
@@ -716,6 +754,7 @@ class Runtime:
                 subgroup_id,
                 publisher_priority,
                 end_of_group,
+                has_properties=properties_data is not None,
             )
             self._subgroups[request_id] = writer
 
@@ -736,6 +775,8 @@ class Runtime:
         subgroup_id: int | None,
         publisher_priority: int | None,
         end_of_group: bool,
+        *,
+        has_properties: bool = False,
     ) -> SubgroupWriter:
         """新しい subgroup ストリームを開いてヘッダを書き込む。"""
         stream_id = await self._ops.open_uni_stream()
@@ -749,7 +790,7 @@ class Runtime:
                 group_id,
                 subgroup_id,
                 publisher_priority,
-                False,
+                has_properties,
                 end_of_group,
                 False,
             )
@@ -759,12 +800,13 @@ class Runtime:
             group_id,
             subgroup_id,
             publisher_priority,
+            has_properties=has_properties,
             end_of_group=end_of_group,
         )
         await self._ops.send_stream_data(stream_id, header, False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
-        return SubgroupWriter(stream_id=stream_id, group_id=group_id)
+        return SubgroupWriter(stream_id=stream_id, group_id=group_id, has_properties=has_properties)
 
     async def _finish_subgroup_writer(self, request_id: int, writer: SubgroupWriter) -> None:
         """subgroup ストリームを FIN で終了する。"""
@@ -1310,20 +1352,47 @@ def _object_status_to_write(status: int | None, payload: bytes) -> int | None:
     return status
 
 
+def _properties_content(properties_data: bytes) -> bytes:
+    """Properties ブロックから `Properties Length` を外して内容だけを返す。
+
+    ワイヤ上のオブジェクトは `Properties Length | Key-Value-Pairs` を持つ
+    (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。`ObjectProperties.encode`
+    が返す値はこの全体であるため、オブジェクトへ書き込むときは長さ部分を分離する。
+
+    長さが後続のバイト数と一致する場合は長さ付きとして扱い、一致しない場合は
+    長さなしの内容として扱う。LOC のプロパティのように長さを含まないブロックを
+    渡した場合にも対応する。
+    """
+    length, consumed = moqt.decode_varint(properties_data)
+    if length == len(properties_data) - consumed:
+        return properties_data[consumed:]
+    return properties_data
+
+
 def _encode_subgroup_object(
     object_id_delta: int,
     payload: bytes,
     status: int | None = None,
+    properties_data: bytes | None = None,
 ) -> bytes:
     """subgroup オブジェクトをエンコードする。
 
     `object_id_delta` は最初のオブジェクトでは絶対値、以降は
     `(今回の Object ID) - (前回の Object ID) - 1` である
     (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+
+    `properties_data` は `Properties Length | Key-Value-Pairs` の形である。
+    省略した場合は Properties を書かない。
     """
     written = _object_status_to_write(status, payload)
     body = bytearray()
     body += moqt.encode_varint(object_id_delta)
+    if properties_data is not None:
+        # オブジェクトは `Properties Length | Key-Value-Pairs` の順に書く
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        content = _properties_content(properties_data)
+        body += moqt.encode_varint(len(content))
+        body += content
     body += moqt.encode_varint(len(payload))
     if written is None:
         body += payload
@@ -1346,7 +1415,8 @@ def _encode_object_datagram(
     """オブジェクトデータグラムをエンコードする (draft-ietf-moq-transport-21 §11.2.1)。
 
     フィールドの並びは Type Flags、Track Alias、Group ID、Object ID である。
-    bit 4 は未定義であり、設定してはならない。
+    bit 4 は未定義であり、設定してはならない。Object ID が 0 の場合は
+    ZERO_OBJECT_ID bit を立てて Object ID フィールドを省略する。
     """
     written = _object_status_to_write(status, payload)
     type_byte = 0x00
@@ -1354,6 +1424,9 @@ def _encode_object_datagram(
         type_byte |= 0x01
     if end_of_group:
         type_byte |= 0x02
+    # Object ID が 0 の場合はフィールドを省略できる
+    if object_id == 0:
+        type_byte |= 0x04
     if publisher_priority is None:
         type_byte |= 0x08
     if written is not None:
@@ -1365,11 +1438,16 @@ def _encode_object_datagram(
     datagram += moqt.encode_varint(type_byte)
     datagram += moqt.encode_varint(track_alias)
     datagram += moqt.encode_varint(group_id)
-    datagram += moqt.encode_varint(object_id)
+    if object_id != 0:
+        datagram += moqt.encode_varint(object_id)
     if publisher_priority is not None:
         datagram.append(publisher_priority)
     if properties_data is not None:
-        datagram += properties_data
+        # データグラムは `Properties Length | Key-Value-Pairs` を書く
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        content = _properties_content(properties_data)
+        datagram += moqt.encode_varint(len(content))
+        datagram += content
     if written is None:
         datagram += payload
     else:

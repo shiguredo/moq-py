@@ -107,6 +107,70 @@ async def test_subscribe_and_receive_objects_over_subgroup(moq_pair: MoqPair) ->
     assert [item.payload for item in received] == [b"first", b"second"]
 
 
+async def test_object_properties_are_delivered(moq_pair: MoqPair) -> None:
+    """
+    subgroup で送った Object Properties が受信側で参照できることを確認する。
+
+    Properties は subgroup ヘッダの has_properties bit で有無が固定される。受信側では
+    `MoqtObject.properties` から生バイトとして取り出し、`ObjectProperties.decode` で
+    解釈する。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    properties = moqt.ObjectProperties()
+    properties.add(moqt.PROP_PRIOR_GROUP_ID_GAP, 3)
+    await published[0].send_object(7, 0, b"with-properties", properties_data=properties.encode())
+
+    received = await _take_objects(subscription, 1)
+
+    assert received[0].payload == b"with-properties"
+    assert received[0].properties is not None
+    decoded, _consumed = moqt.ObjectProperties.decode(received[0].properties)
+    assert decoded.prior_group_id_gap == 3
+    assert received[0].publisher_priority is None
+
+
+async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> None:
+    """
+    データグラムで送った Object Properties が受信側で参照できることを確認する。
+
+    データグラムは subgroup ヘッダを持たないため、`subgroup_id` と
+    `publisher_priority` は `None` のままになる。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    properties = moqt.ObjectProperties()
+    properties.add(moqt.PROP_PRIOR_GROUP_ID_GAP, 2)
+    properties.add(moqt.PROP_OBJECT_DELIVERY_TIMEOUT, 1000)
+    await published[0].send_datagram(9, 0, b"datagram", properties_data=properties.encode())
+
+    received = await _take_objects(subscription, 1)
+
+    assert received[0].payload == b"datagram"
+    assert received[0].stream_id is None
+    assert received[0].subgroup_id is None
+    assert received[0].properties is not None
+    decoded, _consumed = moqt.ObjectProperties.decode(received[0].properties)
+    assert decoded.prior_group_id_gap == 2
+    assert decoded.object_delivery_timeout == 1000
+
+
 async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> None:
     """
     server の GOAWAY が client へ通知されることを確認する。

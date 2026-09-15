@@ -47,8 +47,11 @@ class PeerGoaway:
 class MoqtObject:
     """受信した MoQT オブジェクト。"""
 
-    stream_id: int
-    """受信したデータストリームの ID。"""
+    stream_id: int | None
+    """受信したデータストリームの ID。
+
+    データグラムで届いたオブジェクトは `None` になる。
+    """
 
     group_id: int
     """Group ID。"""
@@ -64,6 +67,29 @@ class MoqtObject:
 
     ペイロード長 0 のオブジェクトだけが持ち、非 0 長では `None` になる。
     (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
+    """
+
+    properties: bytes | None = None
+    """Object Properties の生バイト (`Properties Length | Key-Value-Pairs`)。
+
+    `moqt.moqt.ObjectProperties.decode` で解釈する。データグラムと subgroup の
+    どちらでも同じ形になる。
+    (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)
+    """
+
+    publisher_priority: int | None = None
+    """データストリームが運ぶ Publisher Priority。
+
+    `None` は DEFAULT_PRIORITY bit が立ち、購読の優先度を継承することを示す。
+    データグラムでは常に `None` になる。
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+    """
+
+    subgroup_id: int | None = None
+    """オブジェクトを含む subgroup の Subgroup ID。
+
+    ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` になる。
+    データグラムでは常に `None` になる。
     """
 
 
@@ -503,7 +529,7 @@ class Client:
             fetch._push_range(kind, event.group_id or 0, event.object_id or 0)
         return None
 
-    async def _on_object(self, stream_id: int, event: NativeEvent, payload: bytes) -> None:
+    async def _on_object(self, stream_id: int | None, event: NativeEvent, payload: bytes) -> None:
         """受信したオブジェクトを subscription へ渡す。
 
         data stream は Request ID ではなく Track Alias で購読を特定する。
@@ -517,6 +543,9 @@ class Client:
             object_id=event.object_id or 0,
             payload=payload,
             status=event.status,
+            properties=event.properties,
+            publisher_priority=event.publisher_priority,
+            subgroup_id=event.subgroup_id,
         )
         if track_alias is None:
             # fetch stream のオブジェクトは Track Alias を持たない

@@ -1,10 +1,16 @@
 """`moqt.moqt` の codec と sans I/O セッション状態機械のテスト。"""
 
 import pytest
+from moqt import moqt
 from moqt.moqt import (
+    MANDATORY_TRACK_PROPERTY_MIN,
     PADDING_DATAGRAM_TYPE,
+    PROP_PRIOR_GROUP_ID_GAP,
+    PROP_PRIOR_OBJECT_ID_GAP,
     Event,
+    ObjectProperties,
     Session,
+    TrackProperties,
     classify_data_stream_type,
     decode_message,
     decode_varint,
@@ -512,6 +518,79 @@ def test_request_update_uses_a_separate_request_id() -> None:
         event.kind for event in server.receive_request_stream(4, _message_data(updates[0]), "peer")
     ]
     assert kinds == ["request_update"]
+
+
+def test_object_properties_round_trip() -> None:
+    """Object Properties の encode / decode が往復することを確認する。
+
+    偶数型は varint、奇数型は長さ付きバイト列である
+    (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+    """
+    properties = ObjectProperties()
+    properties.add(PROP_PRIOR_GROUP_ID_GAP, 2)
+    properties.add(PROP_PRIOR_OBJECT_ID_GAP, 7)
+    properties.add(0x0D, b"\x01\x02\x03")
+
+    encoded = properties.encode()
+    decoded, consumed = ObjectProperties.decode(encoded)
+
+    assert consumed == len(encoded)
+    assert decoded == properties
+    assert decoded.prior_group_id_gap == 2
+    assert decoded.prior_object_id_gap == 7
+    assert decoded.to_dict()[0x0D] == b"\x01\x02\x03"
+
+
+def test_object_properties_rejects_a_truncated_block() -> None:
+    """切り詰めたプロパティブロックを decode が拒否することを確認する。
+
+    宣言された Properties Length より後続が短い場合は `ValueError` になる。
+    """
+    properties = ObjectProperties()
+    properties.add(PROP_PRIOR_GROUP_ID_GAP, 2)
+    encoded = properties.encode()
+
+    with pytest.raises(ValueError, match="unexpected end of buffer"):
+        ObjectProperties.decode(encoded[:-1])
+
+
+def test_object_properties_rejects_a_value_that_is_too_long() -> None:
+    """65535 バイトを超える奇数型の値を encode が拒否することを確認する。
+
+    (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))
+    """
+    properties = ObjectProperties()
+    properties.add(0x0D, b"\x00" * (2**16))
+
+    with pytest.raises(ValueError, match="too long"):
+        properties.encode()
+
+
+def test_track_properties_accessors() -> None:
+    """Track Properties の型付きアクセサを確認する。"""
+    properties = TrackProperties()
+    properties.add(moqt.PROP_DEFAULT_PUBLISHER_PRIORITY, 200)
+    properties.add(moqt.PROP_DEFAULT_PUBLISHER_GROUP_ORDER, 0x2)
+    properties.add(moqt.PROP_DYNAMIC_GROUPS, 1)
+
+    assert len(properties) == 3
+    assert properties.default_publisher_priority == 200
+    assert properties.default_publisher_group_order == 0x2
+    assert properties.dynamic_groups == 1
+    assert properties.to_dict()[moqt.PROP_DYNAMIC_GROUPS] == 1
+    assert properties.has_unknown_mandatory is False
+
+
+def test_track_properties_detects_an_unknown_mandatory_property() -> None:
+    """未知の必須 Track Property を検出することを確認する。
+
+    必須の範囲は 0x4000-0x7FFF である
+    (draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties))。
+    """
+    properties = TrackProperties()
+    properties.add(MANDATORY_TRACK_PROPERTY_MIN, 1)
+
+    assert properties.has_unknown_mandatory is True
 
 
 def test_goaway() -> None:

@@ -187,6 +187,21 @@ class Event:
         受信したメッセージのパラメータ。
         """
     @property
+    def properties(self, /) -> bytes |None:
+        """
+        受信したオブジェクトの Properties の生バイト (object イベントのみ)。
+
+        `Properties Length (varint) | Properties データ` の形であり、データグラムと
+        subgroup のどちらでも同じである。`ObjectProperties.decode` で解釈する。
+        """
+    @property
+    def publisher_priority(self, /) -> int |None:
+        """
+        受信したデータストリームの Publisher Priority (object イベントのみ)。
+
+        `None` は DEFAULT_PRIORITY bit が立ち、購読の優先度を継承することを示す。
+        """
+    @property
     def reason(self, /) -> str |None:
         """
         セッション終了理由 (close のみ)。
@@ -213,6 +228,14 @@ class Event:
     def stream_id(self, /) -> int |None:
         """
         対象データストリームの ID。
+        """
+    @property
+    def subgroup_id(self, /) -> int |None:
+        """
+        受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
+
+        ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` に
+        なる (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
         """
     @property
     def track_alias(self, /) -> int |None:
@@ -453,6 +476,94 @@ class Message:
     def type_id(self, /) -> int:
         """
         wire 上のメッセージ Type (vi64)。
+        """
+
+@final
+class ObjectProperties:
+    """
+    MOQT の Object Properties。
+
+    ワイヤフォーマットは `Properties Length (vi64) | Key-Value-Pairs...` である。
+    encode は prop_type の昇順にソートし、delta encoding で型番号を圧縮する。
+    (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)
+    """
+    def __bytes__(self, /) -> bytes:
+        """
+        Properties を含むオブジェクトを送信する引数へそのまま渡せるバイト列を返す。
+
+        `moqt.moq.Publication.send_object` と `send_datagram` の `properties_data` は
+        この形を受け取る。
+        """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __len__(self, /) -> int: ...
+    def __new__(cls, /) -> ObjectProperties:
+        """
+        空のプロパティ集合を作成する。
+        """
+    def __repr__(self, /) -> str: ...
+    def add(self, /, prop_type: int, value: Any) -> None:
+        """
+        プロパティを 1 件追加する。
+
+        偶数型は varint として `int` を、奇数型は長さ付きバイト列として `bytes` を渡す。
+        この時点では型番号と値の型の対応を検査しない。対応が取れていないプロパティは
+        `encode()` が `ValueError` で拒否する。
+        """
+    @staticmethod
+    def decode(data: bytes) -> tuple[ObjectProperties, int]:
+        """
+        バッファ先頭からプロパティブロックをデコードし `(プロパティ, 消費バイト数)` を返す。
+
+        ブロックの後ろに続くバイト列は消費しない。入れ子の IMMUTABLE_PROPERTIES など
+        draft の MUST に違反する入力は `ValueError` になる。
+        """
+    def encode(self, /) -> bytes:
+        """
+        プロパティブロック全体をエンコードする。
+
+        空の集合は Properties Length = 0 の 1 バイトになる。
+        """
+    @property
+    def immutable_properties(self, /) -> bytes |None:
+        """
+        IMMUTABLE_PROPERTIES (0x0B): 途中で変化しないプロパティの入れ子リスト。
+
+        内容は解釈せず生バイト列として返す。
+        (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))
+        """
+    @property
+    def object_delivery_timeout(self, /) -> int |None:
+        """
+        OBJECT_DELIVERY_TIMEOUT (0x02): Object の配送期限 (ms)。
+
+        (draft-ietf-moq-transport-21 §10.2 (OBJECT_DELIVERY_TIMEOUT))
+        """
+    @property
+    def prior_group_id_gap(self, /) -> int |None:
+        """
+        PRIOR_GROUP_ID_GAP (0x3C): 直前の存在しない Group の個数。
+
+        (draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap))
+        """
+    @property
+    def prior_object_id_gap(self, /) -> int |None:
+        """
+        PRIOR_OBJECT_ID_GAP (0x3E): 直前の存在しない Object の個数。
+
+        (draft-ietf-moq-transport-21 §10.9 (Prior Object ID Gap))
+        """
+    @property
+    def subgroup_delivery_timeout(self, /) -> int |None:
+        """
+        SUBGROUP_DELIVERY_TIMEOUT (0x06): Subgroup の配送期限 (ms)。
+
+        (draft-ietf-moq-transport-21 §10.1 (SUBGROUP_DELIVERY_TIMEOUT))
+        """
+    def to_dict(self, /) -> dict:
+        """
+        プロパティを `{prop_type: 値}` の辞書へ変換する。
+
+        未知の型番号も含めてすべて返す。
         """
 
 @final
@@ -733,6 +844,77 @@ class Session:
     def tick(self, /, now_ms: int) -> list[Event]:
         """
         時間を進めてタイムアウトを判定する。
+        """
+
+@final
+class TrackProperties:
+    """
+    MOQT の Track Properties。
+
+    Track 単位で決まるプロパティである。SUBSCRIBE_OK / FETCH_OK / PUBLISH が運ぶ
+    (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __len__(self, /) -> int: ...
+    def __new__(cls, /) -> TrackProperties:
+        """
+        空のプロパティ集合を作成する。
+        """
+    def __repr__(self, /) -> str: ...
+    def add(self, /, prop_type: int, value: Any) -> None:
+        """
+        プロパティを 1 件追加する。
+
+        偶数型は varint として `int` を、奇数型は長さ付きバイト列として `bytes` を渡す。
+        """
+    @property
+    def default_publisher_group_order(self, /) -> int |None:
+        """
+        DEFAULT_PUBLISHER_GROUP_ORDER (0x22): 既定の Group Order。
+
+        省略時は `None` になる。draft の既定値 Ascending (0x1) は適用しない
+        (draft-ietf-moq-transport-21 §10.5 (Default Publisher Group Order))。
+        """
+    @property
+    def default_publisher_priority(self, /) -> int |None:
+        """
+        DEFAULT_PUBLISHER_PRIORITY (0x0E): 既定の Publisher Priority。
+
+        省略時は `None` になる。draft の既定値 128 は適用しない
+        (draft-ietf-moq-transport-21 §10.4 (Default Publisher Priority))。
+        """
+    @property
+    def dynamic_groups(self, /) -> int |None:
+        """
+        DYNAMIC_GROUPS (0x30): Group が動的に決まるか。
+
+        (draft-ietf-moq-transport-21 §10.6 (Dynamic Groups))
+        """
+    @property
+    def has_unknown_mandatory(self, /) -> bool:
+        """
+        未知の必須プロパティを含むか。
+
+        必須の範囲は `MANDATORY_TRACK_PROPERTY_MIN` から `MANDATORY_TRACK_PROPERTY_MAX`
+        である (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)。未知の必須
+        プロパティを含む Track は扱えないため、アプリは購読を拒否できる。
+        """
+    @property
+    def object_delivery_timeout(self, /) -> int |None:
+        """
+        OBJECT_DELIVERY_TIMEOUT (0x02): Object の配送期限 (ms)。
+        """
+    @property
+    def subgroup_delivery_timeout(self, /) -> int |None:
+        """
+        SUBGROUP_DELIVERY_TIMEOUT (0x06): Subgroup の配送期限 (ms)。
+        """
+    def to_dict(self, /) -> dict:
+        """
+        プロパティを `{prop_type: 値}` の辞書へ変換する。
+
+        辞書は Session の `send_*` に渡す `track_properties` 引数と同じ形である。
+        未知の型番号も含めてすべて返す。
         """
 
 @final

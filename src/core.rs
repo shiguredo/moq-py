@@ -663,6 +663,21 @@ pub(crate) struct CoreEvent {
     /// ペイロード長 0 のオブジェクトだけが持ち、非 0 長では `None` になる
     /// (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
     status: Option<u64>,
+    /// 受信したオブジェクトの Properties の生バイト (object イベントのみ)。
+    ///
+    /// `Properties Length (varint) | Properties データ` の形である。データグラムと
+    /// subgroup のどちらでも同じ形であり、アプリは `ObjectProperties.decode` で解釈する
+    /// (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)。
+    properties: Option<Vec<u8>>,
+    /// 受信したデータストリームの Publisher Priority (object イベントのみ)。
+    ///
+    /// `None` は DEFAULT_PRIORITY bit が立ち、購読の優先度を継承することを示す
+    /// (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    publisher_priority: Option<u8>,
+    /// 受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
+    ///
+    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` になる。
+    subgroup_id: Option<u64>,
     /// 受信したメッセージのパラメータ。
     parameters: Option<Py<PyDict>>,
 }
@@ -685,6 +700,9 @@ impl CoreEvent {
             track_alias: None,
             group_id: None,
             status: None,
+            properties: None,
+            publisher_priority: None,
+            subgroup_id: None,
             parameters: None,
         }
     }
@@ -697,23 +715,26 @@ impl CoreEvent {
     ///
     /// `request_id` はストリームを所有する subscription / fetch の Request ID である。
     /// どの subscription のオブジェクトかを Python 側が判別するために使う。
-    fn object(
-        stream_id: u64,
-        object_id: u64,
-        payload: Vec<u8>,
-        acceptance: &'static str,
-        track_alias: Option<u64>,
-        group_id: Option<u64>,
-        status: Option<u64>,
-    ) -> Self {
+    /// 受信したオブジェクトを表すイベントを作る。
+    ///
+    /// `request_id` はストリームを所有する subscription / fetch の Request ID である。
+    /// どの subscription のオブジェクトかを Python 側が判別するために使う。
+    ///
+    /// `parts` の `properties` はデータグラムと subgroup で同じ形にする。
+    /// `publisher_priority` と `subgroup_id` はデータストリームのヘッダが運ぶ値であり、
+    /// データグラムでは `None` になる。
+    fn object(stream_id: Option<u64>, parts: ObjectEventParts) -> Self {
         Self {
-            stream_id: Some(stream_id),
-            object_id: Some(object_id),
-            data: Some(payload),
-            acceptance: Some(acceptance),
-            track_alias,
-            group_id,
-            status,
+            stream_id,
+            object_id: Some(parts.object_id),
+            data: Some(parts.payload),
+            acceptance: Some(parts.acceptance),
+            track_alias: parts.track_alias,
+            group_id: parts.group_id,
+            status: parts.status,
+            properties: parts.properties,
+            publisher_priority: parts.publisher_priority,
+            subgroup_id: parts.subgroup_id,
             ..Self::simple("object")
         }
     }
@@ -834,6 +855,34 @@ impl CoreEvent {
         self.status
     }
 
+    /// 受信したオブジェクトの Properties の生バイト (object イベントのみ)。
+    ///
+    /// `Properties Length (varint) | Properties データ` の形であり、データグラムと
+    /// subgroup のどちらでも同じである。`ObjectProperties.decode` で解釈する。
+    #[getter]
+    fn properties(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
+        self.properties
+            .as_ref()
+            .map(|value| PyBytes::new(py, value).unbind())
+    }
+
+    /// 受信したデータストリームの Publisher Priority (object イベントのみ)。
+    ///
+    /// `None` は DEFAULT_PRIORITY bit が立ち、購読の優先度を継承することを示す。
+    #[getter]
+    fn publisher_priority(&self) -> Option<u8> {
+        self.publisher_priority
+    }
+
+    /// 受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
+    ///
+    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` に
+    /// なる (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    #[getter]
+    fn subgroup_id(&self) -> Option<u64> {
+        self.subgroup_id
+    }
+
     /// RESET_STREAM の reliable size。
     #[getter]
     fn reliable_size(&self) -> Option<u64> {
@@ -899,6 +948,47 @@ enum DataStreamDecoder {
     Padding,
 }
 
+/// 受信したオブジェクトのイベントを組み立てる値。
+///
+/// データストリームとデータグラムで共通の値をまとめる。
+#[derive(Debug, Clone)]
+struct ObjectEventParts {
+    /// Object ID。
+    object_id: u64,
+    /// ペイロード。
+    payload: Vec<u8>,
+    /// 受理結果。
+    acceptance: &'static str,
+    /// Track Alias。データグラムと subgroup はヘッダが運ぶ。
+    track_alias: Option<u64>,
+    /// Group ID。
+    group_id: Option<u64>,
+    /// Object Status。ペイロード長 0 のオブジェクトだけが持つ。
+    status: Option<u64>,
+    /// Properties の生バイト。
+    properties: Option<Vec<u8>>,
+    /// Publisher Priority。データストリームだけが持つ。
+    publisher_priority: Option<u8>,
+    /// Subgroup ID。データストリームだけが持つ。
+    subgroup_id: Option<u64>,
+}
+
+/// 受信中のデータストリームのヘッダ情報。
+///
+/// subgroup ヘッダはストリームごとに 1 度だけ届き、以降のオブジェクトがその値を
+/// 引き継ぐ。オブジェクトのイベントへ載せるために保持する。
+#[derive(Debug, Clone, Copy)]
+struct DataHeaderInfo {
+    /// Track Alias。
+    track_alias: u64,
+    /// Group ID。
+    group_id: u64,
+    /// Publisher Priority。`None` は購読の優先度を継承する。
+    publisher_priority: Option<u8>,
+    /// Subgroup ID。`None` はヘッダが Subgroup ID を持たない。
+    subgroup_id: Option<u64>,
+}
+
 /// 1 本の MoQT Transport Session に対応する sans I/O セッション状態機械。
 ///
 /// ストリームの実体には触れない。呼び出し側が peer のストリーム種別を判定して
@@ -918,9 +1008,8 @@ pub(crate) struct CoreSession {
     data_buffers: StreamBuffers,
     /// stream type を通知済みの data stream と、そのデコーダ。
     data_decoders: HashMap<u64, DataStreamDecoder>,
-    /// 受信中のデータストリームの Track Alias と Group ID
-    /// (subgroup ヘッダで確定する)。
-    data_track_aliases: HashMap<u64, (u64, u64)>,
+    /// 受信中のデータストリームのヘッダ情報 (subgroup ヘッダで確定する)。
+    data_headers: HashMap<u64, DataHeaderInfo>,
     /// ペイロードの到着を待っている subgroup オブジェクト (stream_id 索引)。
     ///
     /// WebTransport の受信 fragment 境界はオブジェクト境界と一致しない。オブジェクトの
@@ -981,7 +1070,7 @@ impl CoreSession {
             request_streams: HashMap::new(),
             data_buffers: StreamBuffers::default(),
             data_decoders: HashMap::new(),
-            data_track_aliases: HashMap::new(),
+            data_headers: HashMap::new(),
             pending_subgroup_objects: HashMap::new(),
             pending_fetch_entries: HashMap::new(),
             last_error: None,
@@ -1581,8 +1670,24 @@ impl CoreSession {
                     self.session
                         .recv_subgroup_header(stream, &header)
                         .map_err(runtime_error)?;
-                    self.data_track_aliases
-                        .insert(stream_id, (header.track_alias, header.group_id));
+                    // Subgroup ID を持たないモードではヘッダからは決まらない。Zero は 0、
+                    // FirstObjectId は最初のオブジェクト ID になるため、ここでは `None`
+                    // としてアプリへ渡す
+                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+                    let subgroup_id = match header.subgroup_id {
+                        SubgroupIdMode::Zero => Some(0),
+                        SubgroupIdMode::Explicit(id) => Some(id),
+                        SubgroupIdMode::FirstObjectId => None,
+                    };
+                    self.data_headers.insert(
+                        stream_id,
+                        DataHeaderInfo {
+                            track_alias: header.track_alias,
+                            group_id: header.group_id,
+                            publisher_priority: header.publisher_priority,
+                            subgroup_id,
+                        },
+                    );
                     self.data_headers_decoded.insert(stream_id);
                 }
                 // ヘッダが揃うまでオブジェクトはデコードできない
@@ -1624,18 +1729,20 @@ impl CoreSession {
                         object.payload_length,
                         acceptance,
                     ));
+                    let header = self.data_headers.get(&stream_id).copied();
                     events.push(CoreEvent::object(
-                        stream_id,
-                        object.object_id,
-                        payload,
-                        acceptance,
-                        self.data_track_aliases
-                            .get(&stream_id)
-                            .map(|(alias, _)| *alias),
-                        self.data_track_aliases
-                            .get(&stream_id)
-                            .map(|(_, group)| *group),
-                        object.status,
+                        Some(stream_id),
+                        ObjectEventParts {
+                            object_id: object.object_id,
+                            payload,
+                            acceptance,
+                            track_alias: header.map(|info| info.track_alias),
+                            group_id: header.map(|info| info.group_id),
+                            status: object.status,
+                            properties: object.properties_bytes.clone(),
+                            publisher_priority: header.and_then(|info| info.publisher_priority),
+                            subgroup_id: header.and_then(|info| info.subgroup_id),
+                        },
                     ));
                 }
             }
@@ -1698,6 +1805,10 @@ impl CoreSession {
                                 // Object Status は FETCH で運ばれるオブジェクトには無い
                                 // (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
                                 status: None,
+                                // FETCH のオブジェクトは Subgroup ID と Publisher Priority を
+                                // エントリ自身が運ぶ
+                                publisher_priority: Some(object.publisher_priority),
+                                subgroup_id: Some(object.subgroup_id),
                                 ..CoreEvent::simple("object")
                             });
                         }
@@ -1755,7 +1866,7 @@ impl CoreSession {
     ) -> PyResult<Vec<CoreEvent>> {
         self.data_buffers.remove(stream_id);
         self.data_decoders.remove(&stream_id);
-        self.data_track_aliases.remove(&stream_id);
+        self.data_headers.remove(&stream_id);
         self.pending_subgroup_objects.remove(&stream_id);
         self.pending_fetch_entries.remove(&stream_id);
         self.data_stream_types_received.remove(&stream_id);
@@ -1777,21 +1888,27 @@ impl CoreSession {
         if let DatagramAcceptance::Object(acceptance) = acceptance {
             let acceptance = track_data_acceptance_to_python(acceptance);
             if acceptance == "accepted" {
-                // 受理したデータグラムを復号し、ペイロードを取り出す
+                // 受理したデータグラムを復号し、ペイロードと Properties を取り出す
                 let (datagram, consumed) = ObjectDatagram::decode(data).map_err(runtime_error)?;
                 let payload = data[consumed..].to_vec();
                 events.insert(
                     0,
-                    CoreEvent {
-                        stream_id: None,
-                        object_id: Some(datagram.object_id),
-                        track_alias: Some(datagram.track_alias),
-                        group_id: Some(datagram.group_id),
-                        acceptance: Some(acceptance),
-                        data: Some(payload),
-                        status: datagram.status,
-                        ..CoreEvent::simple("object")
-                    },
+                    CoreEvent::object(
+                        None,
+                        ObjectEventParts {
+                            object_id: datagram.object_id,
+                            payload,
+                            acceptance,
+                            track_alias: Some(datagram.track_alias),
+                            group_id: Some(datagram.group_id),
+                            status: datagram.status,
+                            properties: datagram.properties_data.clone(),
+                            // データグラムは subgroup ヘッダを持たないため、
+                            // Publisher Priority と Subgroup ID は入らない
+                            publisher_priority: None,
+                            subgroup_id: None,
+                        },
+                    ),
                 );
             } else {
                 events.insert(0, CoreEvent::simple(acceptance));

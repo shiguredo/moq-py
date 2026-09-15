@@ -211,6 +211,7 @@ class Publication:
         publisher_priority: int | None = None,
         end_of_group: bool = False,
         status: int | None = None,
+        properties_data: bytes | None = None,
     ) -> None:
         """subgroup ストリームでオブジェクトを送信する。
 
@@ -218,6 +219,11 @@ class Publication:
         `moqt.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
         オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
         (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
+
+        `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
+        Properties の有無は subgroup ヘッダで固定されるため、同じ subgroup の
+        最初のオブジェクトで決める
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
         """
         await self.runtime.send_subgroup_object(
             self.request_id,
@@ -229,6 +235,7 @@ class Publication:
             publisher_priority=publisher_priority,
             end_of_group=end_of_group,
             status=status,
+            properties_data=properties_data,
         )
 
     async def send_datagram(

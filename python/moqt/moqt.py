@@ -15,7 +15,9 @@ from moqt import _native
 from moqt._native import (
     Event,
     Message,
+    ObjectProperties,
     Session,
+    TrackProperties,
     classify_data_stream_type,
     decode_message,
     decode_varint,
@@ -114,9 +116,48 @@ MAX_DATAGRAM_SIZE: int = 1100
 # (draft-ietf-moq-transport-21 §9.20.5 (PUBLISHER_PRIORITY Parameter))
 PUBLISHER_PRIORITY_DEFAULT: int = _native.PUBLISHER_PRIORITY_DEFAULT
 
+# Object Properties の型番号
+# (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)
+PROP_PRIOR_GROUP_ID_GAP: int = _native.PROP_PRIOR_GROUP_ID_GAP
+"""直前の存在しない Group の個数 (§10.8)。"""
+
+PROP_PRIOR_OBJECT_ID_GAP: int = _native.PROP_PRIOR_OBJECT_ID_GAP
+"""直前の存在しない Object の個数 (§10.9)。"""
+
+# Track Properties の型番号
+# (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)
+PROP_OBJECT_DELIVERY_TIMEOUT: int = _native.PROP_OBJECT_DELIVERY_TIMEOUT
+"""Object の配送期限 (ms) (§10.2)。"""
+
+PROP_MAX_CACHE_DURATION: int = _native.PROP_MAX_CACHE_DURATION
+"""キャッシュの保持期間 (ms)。"""
+
+PROP_SUBGROUP_DELIVERY_TIMEOUT: int = _native.PROP_SUBGROUP_DELIVERY_TIMEOUT
+"""Subgroup の配送期限 (ms) (§10.1)。"""
+
+PROP_IMMUTABLE_PROPERTIES: int = _native.PROP_IMMUTABLE_PROPERTIES
+"""途中で変化しないプロパティの入れ子リスト (§10.7)。"""
+
+PROP_DEFAULT_PUBLISHER_PRIORITY: int = _native.PROP_DEFAULT_PUBLISHER_PRIORITY
+"""既定の Publisher Priority (§10.4)。"""
+
+PROP_DEFAULT_PUBLISHER_GROUP_ORDER: int = _native.PROP_DEFAULT_PUBLISHER_GROUP_ORDER
+"""既定の Group Order (§10.5)。"""
+
+PROP_DYNAMIC_GROUPS: int = _native.PROP_DYNAMIC_GROUPS
+"""Group が動的に決まるか (§10.6)。"""
+
+MANDATORY_TRACK_PROPERTY_MIN: int = _native.MANDATORY_TRACK_PROPERTY_MIN
+"""必須の Track Property の型番号の下限 (§3.6)。"""
+
+MANDATORY_TRACK_PROPERTY_MAX: int = _native.MANDATORY_TRACK_PROPERTY_MAX
+"""必須の Track Property の型番号の上限 (§3.6)。"""
+
 __all__ = [
     "DEFAULT_SUBSCRIBER_PRIORITY",
     "FETCH_HEADER_TYPE",
+    "MANDATORY_TRACK_PROPERTY_MAX",
+    "MANDATORY_TRACK_PROPERTY_MIN",
     "MAX_DATAGRAM_SIZE",
     "OBJECT_STATUS_END_OF_GROUP",
     "OBJECT_STATUS_END_OF_TRACK",
@@ -142,6 +183,15 @@ __all__ = [
     "PARAM_SUBSCRIBER_PRIORITY",
     "PARAM_TRACK_NAMESPACE_PREFIX",
     "PARAM_TRACK_PROPERTY_FILTER",
+    "PROP_DEFAULT_PUBLISHER_GROUP_ORDER",
+    "PROP_DEFAULT_PUBLISHER_PRIORITY",
+    "PROP_DYNAMIC_GROUPS",
+    "PROP_IMMUTABLE_PROPERTIES",
+    "PROP_MAX_CACHE_DURATION",
+    "PROP_OBJECT_DELIVERY_TIMEOUT",
+    "PROP_PRIOR_GROUP_ID_GAP",
+    "PROP_PRIOR_OBJECT_ID_GAP",
+    "PROP_SUBGROUP_DELIVERY_TIMEOUT",
     "PUBLISHER_PRIORITY_DEFAULT",
     "PUBLISH_DONE_GOING_AWAY",
     "PUBLISH_DONE_INTERNAL_ERROR",
@@ -165,7 +215,9 @@ __all__ = [
     "STREAM_MALFORMED_TRACK",
     "Event",
     "Message",
+    "ObjectProperties",
     "Session",
+    "TrackProperties",
     "classify_data_stream_type",
     "decode_message",
     "decode_varint",
