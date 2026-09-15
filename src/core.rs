@@ -26,9 +26,8 @@ use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::message::common::{Location, TrackNamespace};
 use shiguredo_moqt::message::{
-    ControlMessage, FetchOk, Publish, PublishDone, PublishSkipped, PublishStateNotify, Redirect,
-    RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeNamespace, SubscribeOk,
-    SubscribeTracks, TrackStatus,
+    ControlMessage, FetchOk, Publish, PublishDone, PublishStateNotify, Redirect, RequestError,
+    RequestOk, RequestUpdate, Subscribe, SubscribeOk, TrackStatus,
 };
 use shiguredo_moqt::message_parameter::{
     AuthorizationToken, MessageParameter, MessageParameterValue, MessageParameters,
@@ -354,16 +353,10 @@ pub(crate) fn message_kind(message: &ControlMessage) -> &'static str {
         ControlMessage::RequestUpdate(_) => "request_update",
         ControlMessage::Publish(_) => "publish",
         ControlMessage::PublishDone(_) => "publish_done",
-        ControlMessage::PublishSkipped(_) => "publish_skipped",
         ControlMessage::PublishStateNotify(_) => "publish_state_notify",
         ControlMessage::Fetch(_) => "fetch",
         ControlMessage::FetchOk(_) => "fetch_ok",
         ControlMessage::TrackStatus(_) => "track_status",
-        ControlMessage::PublishNamespace(_) => "publish_namespace",
-        ControlMessage::Namespace(_) => "namespace",
-        ControlMessage::NamespaceDone(_) => "namespace_done",
-        ControlMessage::SubscribeNamespace(_) => "subscribe_namespace",
-        ControlMessage::SubscribeTracks(_) => "subscribe_tracks",
     }
 }
 
@@ -377,9 +370,6 @@ pub(crate) fn message_request_id(message: &ControlMessage) -> Option<u64> {
         ControlMessage::Publish(m) => Some(m.request_id),
         ControlMessage::Fetch(m) => Some(m.request_id),
         ControlMessage::TrackStatus(m) => Some(m.request_id),
-        ControlMessage::PublishNamespace(m) => Some(m.request_id),
-        ControlMessage::SubscribeNamespace(m) => Some(m.request_id),
-        ControlMessage::SubscribeTracks(m) => Some(m.request_id),
         _ => None,
     }
 }
@@ -391,9 +381,6 @@ fn request_kind_to_python(kind: RequestKind) -> &'static str {
         RequestKind::Publish => "publish",
         RequestKind::Fetch => "fetch",
         RequestKind::TrackStatus => "track_status",
-        RequestKind::PublishNamespace => "publish_namespace",
-        RequestKind::SubscribeNamespace => "subscribe_namespace",
-        RequestKind::SubscribeTracks => "subscribe_tracks",
     }
 }
 
@@ -417,14 +404,6 @@ fn termination_reason_to_python(
         TerminationReason::SupersededByPublish { new_request_id } => {
             dict.set_item("kind", "superseded_by_publish")?;
             dict.set_item("new_request_id", *new_request_id)?;
-        }
-        TerminationReason::NamespaceImplicitDone { suffixes } => {
-            dict.set_item("kind", "namespace_implicit_done")?;
-            let list = PyList::empty(py);
-            for suffix in suffixes {
-                list.append(track_namespace_to_python(py, suffix)?)?;
-            }
-            dict.set_item("suffixes", list)?;
         }
         TerminationReason::MalformedTrack { reason } => {
             dict.set_item("kind", "malformed_track")?;
@@ -598,16 +577,6 @@ pub(crate) fn message_body_to_python(
             dict.set_item("stream_count", *stream_count)?;
             dict.set_item("reason", reason.as_str())?;
         }
-        ControlMessage::PublishSkipped(PublishSkipped {
-            track_namespace_suffix,
-            track_name,
-        }) => {
-            dict.set_item(
-                "track_namespace_suffix",
-                track_namespace_to_python(py, track_namespace_suffix)?,
-            )?;
-            dict.set_item("track_name", PyBytes::new(py, track_name))?;
-        }
         ControlMessage::PublishStateNotify(PublishStateNotify { parameters }) => {
             dict.set_item("parameters", message_parameters_to_python(py, parameters)?)?;
         }
@@ -652,48 +621,6 @@ pub(crate) fn message_body_to_python(
                 track_namespace_to_python(py, track_namespace)?,
             )?;
             dict.set_item("track_name", PyBytes::new(py, track_name))?;
-            dict.set_item("parameters", message_parameters_to_python(py, parameters)?)?;
-        }
-        ControlMessage::PublishNamespace(namespace) => {
-            dict.set_item("request_id", namespace.request_id)?;
-            dict.set_item(
-                "track_namespace",
-                track_namespace_to_python(py, &namespace.track_namespace)?,
-            )?;
-            dict.set_item(
-                "parameters",
-                message_parameters_to_python(py, &namespace.parameters)?,
-            )?;
-        }
-        // NAMESPACE と NAMESPACE_DONE は同一のワイヤ形式を共有する
-        ControlMessage::Namespace(namespace) | ControlMessage::NamespaceDone(namespace) => {
-            dict.set_item(
-                "track_namespace_suffix",
-                track_namespace_to_python(py, &namespace.track_namespace_suffix)?,
-            )?;
-        }
-        ControlMessage::SubscribeNamespace(SubscribeNamespace {
-            request_id,
-            track_namespace_prefix,
-            parameters,
-        }) => {
-            dict.set_item("request_id", *request_id)?;
-            dict.set_item(
-                "track_namespace_prefix",
-                track_namespace_to_python(py, track_namespace_prefix)?,
-            )?;
-            dict.set_item("parameters", message_parameters_to_python(py, parameters)?)?;
-        }
-        ControlMessage::SubscribeTracks(SubscribeTracks {
-            request_id,
-            track_namespace_prefix,
-            parameters,
-        }) => {
-            dict.set_item("request_id", *request_id)?;
-            dict.set_item(
-                "track_namespace_prefix",
-                track_namespace_to_python(py, track_namespace_prefix)?,
-            )?;
             dict.set_item("parameters", message_parameters_to_python(py, parameters)?)?;
         }
     }
@@ -1264,71 +1191,6 @@ impl CoreSession {
                 Some(request_id),
                 Some(message_parameters_to_python(py, &parameters)?),
             )),
-            SessionEvent::SubscribeTracksReceived {
-                request_id,
-                prefix,
-                parameters,
-            } => {
-                let body = PyDict::new(py);
-                body.set_item(
-                    "track_namespace_prefix",
-                    track_namespace_to_python(py, &prefix)?,
-                )?;
-                Ok(CoreEvent::with_message(
-                    "subscribe_tracks",
-                    body.unbind(),
-                    data.clone(),
-                    Some(request_id),
-                    Some(message_parameters_to_python(py, &parameters)?),
-                ))
-            }
-            SessionEvent::NamespaceReceived { request_id, suffix } => {
-                let body = PyDict::new(py);
-                body.set_item(
-                    "track_namespace_suffix",
-                    track_namespace_to_python(py, &suffix)?,
-                )?;
-                Ok(CoreEvent::with_message(
-                    "namespace",
-                    body.unbind(),
-                    data.clone(),
-                    Some(request_id),
-                    None,
-                ))
-            }
-            SessionEvent::NamespaceDoneReceived { request_id, suffix } => {
-                let body = PyDict::new(py);
-                body.set_item(
-                    "track_namespace_suffix",
-                    track_namespace_to_python(py, &suffix)?,
-                )?;
-                Ok(CoreEvent::with_message(
-                    "namespace_done",
-                    body.unbind(),
-                    data.clone(),
-                    Some(request_id),
-                    None,
-                ))
-            }
-            SessionEvent::PublishSkippedReceived {
-                request_id,
-                suffix,
-                track_name,
-            } => {
-                let body = PyDict::new(py);
-                body.set_item(
-                    "track_namespace_suffix",
-                    track_namespace_to_python(py, &suffix)?,
-                )?;
-                body.set_item("track_name", PyBytes::new(py, &track_name))?;
-                Ok(CoreEvent::with_message(
-                    "publish_skipped",
-                    body.unbind(),
-                    data.clone(),
-                    Some(request_id),
-                    None,
-                ))
-            }
             SessionEvent::RequestTerminated {
                 request_id,
                 kind,
@@ -2259,94 +2121,6 @@ impl CoreSession {
         let parameters = message_parameters_from_python(parameters)?;
         self.session
             .send_track_status(namespace, track_name, parameters)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// PUBLISH_NAMESPACE を送信する。
-    fn send_publish_namespace(
-        &mut self,
-        py: Python<'_>,
-        namespace: Vec<Vec<u8>>,
-        parameters: &Bound<'_, PyAny>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let namespace = track_namespace_from_python(namespace)?;
-        let parameters = message_parameters_from_python(parameters)?;
-        self.session
-            .send_publish_namespace(namespace, parameters)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// SUBSCRIBE_NAMESPACE を送信する。
-    fn send_subscribe_namespace(
-        &mut self,
-        py: Python<'_>,
-        prefix: Vec<Vec<u8>>,
-        parameters: &Bound<'_, PyAny>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let prefix = track_namespace_from_python(prefix)?;
-        let parameters = message_parameters_from_python(parameters)?;
-        self.session
-            .send_subscribe_namespace(prefix, parameters)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// SUBSCRIBE_TRACKS を送信する。
-    fn send_subscribe_tracks(
-        &mut self,
-        py: Python<'_>,
-        prefix: Vec<Vec<u8>>,
-        parameters: &Bound<'_, PyAny>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let prefix = track_namespace_from_python(prefix)?;
-        let parameters = message_parameters_from_python(parameters)?;
-        self.session
-            .send_subscribe_tracks(prefix, parameters)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// NAMESPACE を送信する。
-    fn send_namespace(
-        &mut self,
-        py: Python<'_>,
-        request_id: u64,
-        suffix: Vec<Vec<u8>>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let suffix = track_namespace_from_python(suffix)?;
-        self.session
-            .send_namespace(request_id, suffix)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// NAMESPACE_DONE を送信する。
-    fn send_namespace_done(
-        &mut self,
-        py: Python<'_>,
-        request_id: u64,
-        suffix: Vec<Vec<u8>>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let suffix = track_namespace_from_python(suffix)?;
-        self.session
-            .send_namespace_done(request_id, suffix)
-            .map_err(runtime_error)?;
-        self.drain_events(py)
-    }
-
-    /// PUBLISH_SKIPPED を送信する。
-    fn send_publish_skipped(
-        &mut self,
-        py: Python<'_>,
-        request_id: u64,
-        suffix: Vec<Vec<u8>>,
-        track_name: Vec<u8>,
-    ) -> PyResult<Vec<CoreEvent>> {
-        let suffix = track_namespace_from_python(suffix)?;
-        self.session
-            .send_publish_skipped(request_id, suffix, track_name)
             .map_err(runtime_error)?;
         self.drain_events(py)
     }

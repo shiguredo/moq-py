@@ -171,33 +171,6 @@ class TrackStatus:
     """応答パラメータ (LARGEST_OBJECT など)。"""
 
 
-@dataclass(slots=True)
-class Announcement:
-    """確立した namespace 購読。"""
-
-    request_id: int
-    """SUBSCRIBE_NAMESPACE の Request ID。"""
-
-    prefix: tuple[bytes, ...]
-    """購読した prefix。"""
-
-    _namespaces: asyncio.Queue[tuple[bytes, ...] | None] = field(default_factory=asyncio.Queue)
-
-    async def namespaces(self) -> AsyncIterator[tuple[bytes, ...]]:
-        """通知された namespace を順に返す。"""
-        while True:
-            item = await self._namespaces.get()
-            if item is None:
-                return
-            yield item
-
-    def _push(self, suffix: tuple[bytes, ...]) -> None:
-        self._namespaces.put_nowait(suffix)
-
-    def _finish(self) -> None:
-        self._namespaces.put_nowait(None)
-
-
 class Client:
     """WebTransport 接続上で MoQT を扱う client。"""
 
@@ -225,7 +198,6 @@ class Client:
         self._subscriptions: dict[int, Subscription] = {}
         self._subscriptions_by_alias: dict[int, Subscription] = {}
         self._pending_objects: dict[int, list[MoqtObject]] = {}
-        self._announcements: dict[int, Announcement] = {}
         self._fetches: dict[int, Fetch] = {}
 
         # 受信データはすべてランタイムへ渡す
@@ -324,18 +296,6 @@ class Client:
             subscription._push(item)
         return subscription
 
-    async def subscribe_namespace(
-        self,
-        prefix: Sequence[bytes],
-        parameters: dict[int, object] | None = None,
-    ) -> Announcement:
-        """Namespace を購読する。"""
-        runtime = self._require_runtime()
-        request_id, _event = await runtime.subscribe_namespace(prefix, parameters)
-        announcement = Announcement(request_id=request_id, prefix=tuple(prefix))
-        self._announcements[request_id] = announcement
-        return announcement
-
     async def fetch(
         self,
         namespace: Sequence[bytes],
@@ -363,7 +323,11 @@ class Client:
         body = event.message or {}
         end_location = body.get("end_location")
         fetch.end_of_track = bool(body.get("end_of_track"))
-        fetch.end_location = end_location if isinstance(end_location, tuple) else (0, 0)
+        # end_location は (group_id, object_id) のタプルである。型が違う場合は既定値を使う
+        if isinstance(end_location, tuple) and len(end_location) == 2:
+            group_id, object_id = end_location
+            if isinstance(group_id, int) and isinstance(object_id, int):
+                fetch.end_location = (group_id, object_id)
         return fetch
 
     def _new_fetch(
@@ -408,18 +372,6 @@ class Client:
             track_name=track_name,
             parameters=dict(event.parameters or {}),
         )
-
-    async def subscribe_tracks(
-        self,
-        prefix: Sequence[bytes],
-        parameters: dict[int, object] | None = None,
-    ) -> Announcement:
-        """prefix 配下の Track の通知を購読する (SUBSCRIBE_TRACKS)。"""
-        runtime = self._require_runtime()
-        request_id, _event = await runtime.subscribe_tracks(prefix, parameters)
-        announcement = Announcement(request_id=request_id, prefix=tuple(prefix))
-        self._announcements[request_id] = announcement
-        return announcement
 
     async def goaway(self, timeout: int = 0) -> None:
         """GOAWAY を送信してセッションの終了を予告する。"""
@@ -467,8 +419,6 @@ class Client:
             on_fetch_end=self._on_fetch_end,
             on_request_terminated=self._on_request_terminated,
             on_publish_done=self._on_publish_done,
-            on_namespace=self._on_namespace,
-            on_namespace_done=self._on_namespace_done,
         )
 
     async def _on_established(self) -> None:
@@ -529,12 +479,15 @@ class Client:
         pending.append(item)
 
     async def _on_request_terminated(self, event: NativeEvent) -> None:
-        subscription = self._subscriptions.pop(event.request_id, None)
+        request_id = event.request_id
+        if request_id is None:
+            return
+        subscription = self._subscriptions.pop(request_id, None)
         if subscription is not None:
             self._subscriptions_by_alias.pop(subscription.track_alias, None)
             self._pending_objects.pop(subscription.track_alias, None)
             subscription._finish()
-        fetch = self._fetches.pop(event.request_id, None)
+        fetch = self._fetches.pop(request_id, None)
         if fetch is not None:
             fetch._finish()
 
@@ -542,16 +495,6 @@ class Client:
         subscription = self._subscriptions.get(event.request_id or -1)
         if subscription is not None:
             subscription._finish()
-
-    async def _on_namespace(self, event: NativeEvent) -> None:
-        announcement = self._announcements.get(event.request_id or -1)
-        if announcement is not None:
-            announcement._push(_body_namespace(event.message, "track_namespace_suffix"))
-
-    async def _on_namespace_done(self, event: NativeEvent) -> None:
-        announcement = self._announcements.get(event.request_id or -1)
-        if announcement is not None:
-            announcement._finish()
 
     async def _on_task_error(self, error: BaseException) -> None:
         self._fail_connect(error)
@@ -639,18 +582,7 @@ def _body_int(body: MessageBody | None, key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _body_namespace(body: MessageBody | None, key: str) -> tuple[bytes, ...]:
-    """メッセージ本体から Track Namespace を取り出す。"""
-    if body is None:
-        return ()
-    value = body.get(key)
-    if not isinstance(value, list):
-        return ()
-    return tuple(field for field in value if isinstance(field, bytes))
-
-
 __all__ = [
-    "Announcement",
     "Client",
     "Fetch",
     "MoqtObject",

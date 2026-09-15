@@ -153,7 +153,7 @@ dependencies = [
 [[package]]
 name = "shiguredo_moqt"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/moqt-rs.git?branch=develop#d3b00b237017198d2199239b6c3b14eefce6921a"
+source = "git+https://github.com/shiguredo/moqt-rs.git?branch=develop#3f715dc6d7e4a30167001621be3ec4a4b1374ea2"
 dependencies = [
  "hashbrown",
  "noflate",

@@ -8,7 +8,7 @@ sans I/O 状態機械を直接扱う必要はない。
 
 - `Client`: WebTransport 接続を張って MoQT セッションを開始する
 - `Server`: WebTransport 接続を受け入れて MoQT セッションを開始する
-- `Subscription` / `Fetch` / `TrackStatus` / `Announcement`: client 側の要求
+- `Subscription` / `Fetch` / `TrackStatus`: client 側の要求
 - `SubscriptionRequest` / `FetchRequest` / `Publication`: server 側の応答
 - `moqt.moq.testing`: 他プロジェクトのテストから使う pytest fixture 群
 
@@ -19,7 +19,6 @@ relay は含まない。MoQ は draft 由来であり、将来の改訂で変更
 """
 
 from moqt.moq.client import (
-    Announcement,
     Client,
     Fetch,
     MoqtObject,
@@ -36,7 +35,6 @@ from moqt.moq.server import (
 )
 
 __all__ = [
-    "Announcement",
     "Client",
     "Fetch",
     "FetchRequest",

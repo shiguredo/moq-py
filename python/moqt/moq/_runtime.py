@@ -184,8 +184,6 @@ class RuntimeEvents:
     on_request_terminated: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_request_update: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_publish_done: Callable[[NativeEvent], Awaitable[None]] | None = None
-    on_namespace: Callable[[NativeEvent], Awaitable[None]] | None = None
-    on_namespace_done: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_goaway: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_object: Callable[[int, NativeEvent, bytes], Awaitable[None]] | None = None
     on_fetch_end: Callable[[str, NativeEvent], Awaitable[None]] | None = None
@@ -222,8 +220,6 @@ class RuntimeEvents:
             on_request_terminated=wrap(self.on_request_terminated),
             on_request_update=wrap(self.on_request_update),
             on_publish_done=wrap(self.on_publish_done),
-            on_namespace=wrap(self.on_namespace),
-            on_namespace_done=wrap(self.on_namespace_done),
             on_goaway=wrap(self.on_goaway),
             on_object=wrap(self.on_object),
             on_fetch_end=wrap(self.on_fetch_end),
@@ -453,18 +449,6 @@ class Runtime:
             )
         )
 
-    async def announce(
-        self,
-        namespace: Sequence[bytes],
-        parameters: dict[int, object] | None = None,
-    ) -> tuple[int, NativeEvent]:
-        """PUBLISH_NAMESPACE を送信し、応答を待つ。"""
-        return await self._start_request(
-            lambda request_id: self._core.send_publish_namespace(
-                list(namespace), dict(parameters or {})
-            )
-        )
-
     async def fetch(
         self,
         namespace: Sequence[bytes],
@@ -495,18 +479,6 @@ class Runtime:
         return await self._start_request(
             lambda request_id: self._core.send_track_status(
                 list(namespace), track_name, dict(parameters or {})
-            )
-        )
-
-    async def subscribe_tracks(
-        self,
-        prefix: Sequence[bytes],
-        parameters: dict[int, object] | None = None,
-    ) -> tuple[int, NativeEvent]:
-        """SUBSCRIBE_TRACKS を送信し、応答を待つ。"""
-        return await self._start_request(
-            lambda request_id: self._core.send_subscribe_tracks(
-                list(prefix), dict(parameters or {})
             )
         )
 
@@ -588,18 +560,6 @@ class Runtime:
                 end_location,
                 dict(parameters or {}),
                 dict(track_properties or {}),
-            )
-        )
-
-    async def subscribe_namespace(
-        self,
-        prefix: Sequence[bytes],
-        parameters: dict[int, object] | None = None,
-    ) -> tuple[int, NativeEvent]:
-        """SUBSCRIBE_NAMESPACE を送信し、応答を待つ。"""
-        return await self._start_request(
-            lambda request_id: self._core.send_subscribe_namespace(
-                list(prefix), dict(parameters or {})
             )
         )
 
@@ -686,14 +646,6 @@ class Runtime:
         await self._apply_events(
             self._core.send_publish_done_for_subscription(request_id, status_code, reason)
         )
-
-    async def send_namespace(self, request_id: int, suffix: Sequence[bytes]) -> None:
-        """NAMESPACE を送信する。"""
-        await self._apply_events(self._core.send_namespace(request_id, list(suffix)))
-
-    async def send_namespace_done(self, request_id: int, suffix: Sequence[bytes]) -> None:
-        """NAMESPACE_DONE を送信する。"""
-        await self._apply_events(self._core.send_namespace_done(request_id, list(suffix)))
 
     async def send_goaway(self, timeout: int = 0) -> None:
         """GOAWAY を送信する。"""
@@ -949,7 +901,8 @@ class Runtime:
         fin = bool(event.fin)
         await self._ops.send_stream_data(stream_id, _event_bytes(event, "message_data"), fin)
         if fin:
-            self._request_streams.pop(request_id, None)
+            if request_id is not None:
+                self._request_streams.pop(request_id, None)
             self._streams.pop(stream_id, None)
 
     def _find_incoming_request_stream(self, request_id: int | None) -> int | None:
@@ -1031,10 +984,6 @@ class Runtime:
             await self._notify(self._events.on_request_update, event)
         elif kind == "publish_done":
             await self._notify(self._events.on_publish_done, event)
-        elif kind == "namespace":
-            await self._notify(self._events.on_namespace, event)
-        elif kind == "namespace_done":
-            await self._notify(self._events.on_namespace_done, event)
         elif kind == "goaway":
             await self._notify(self._events.on_goaway, event)
         elif kind in {
@@ -1042,9 +991,6 @@ class Runtime:
             "publish",
             "fetch",
             "track_status",
-            "publish_namespace",
-            "subscribe_namespace",
-            "subscribe_tracks",
         }:
             # peer から届いた request は、そのストリームを応答用に登録しておく
             self._remember_incoming_request(event)

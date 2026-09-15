@@ -473,43 +473,25 @@ def test_is_padding_datagram(data: bytes, expected: bool) -> None:
 
 
 def test_track_status() -> None:
-    """TRACK_STATUS の応答を確認する。"""
+    """TRACK_STATUS の送信を確認する。
+
+    TRACK_STATUS は relay が返す応答であり、endpoint は受信しない
+    (moqt-rs の `recv_request` が `subscribe` / `publish` / `fetch` だけを扱う)。
+    """
+    client, _server = _setup()
+    events = client.send_track_status([b"ns"], b"t", {})
+    assert [event.kind for event in events] == ["send_request"]
+    assert client.next_local_request_id() >= 0
+
+
+def test_peer_request_rejects_track_status() -> None:
+    """peer から届いた TRACK_STATUS を endpoint が拒否することを確認する。"""
     client, server = _setup()
     events = client.send_track_status([b"ns"], b"t", {})
     request_id = _request_id(events[0])
-    result = _round_trip(client, server, 4, events, request_id)
-    assert [event.kind for event in result] == ["request_ok"]
-
-
-def test_subscribe_namespace() -> None:
-    """SUBSCRIBE_NAMESPACE と NAMESPACE 通知を確認する。"""
-    client, server = _setup()
-    events = client.send_subscribe_namespace([b"ns"], {})
-    request_id = _request_id(events[0])
-    _round_trip(client, server, 4, events, request_id)
-    notice = server.send_namespace(request_id, [b"suffix"])
-    kinds = [
-        event.kind for event in client.receive_request_stream(4, _message_data(notice[0]), "local")
-    ]
-    assert "namespace" in kinds
-
-
-def test_publish_namespace() -> None:
-    """PUBLISH_NAMESPACE の応答を確認する。"""
-    client, server = _setup()
-    events = client.send_publish_namespace([b"ns"], {})
-    request_id = _request_id(events[0])
-    result = _round_trip(client, server, 4, events, request_id)
-    assert [event.kind for event in result] == ["request_ok"]
-
-
-def test_subscribe_tracks() -> None:
-    """SUBSCRIBE_TRACKS の応答を確認する。"""
-    client, server = _setup()
-    events = client.send_subscribe_tracks([b"ns"], {})
-    request_id = _request_id(events[0])
-    result = _round_trip(client, server, 4, events, request_id)
-    assert [event.kind for event in result] == ["request_ok"]
+    client.register_local_request_stream(4, request_id)
+    with pytest.raises(RuntimeError, match="unsupported request message"):
+        server.receive_request_stream(4, _message_data(events[0]), "peer")
 
 
 def test_goaway() -> None:

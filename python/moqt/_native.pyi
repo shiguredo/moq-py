@@ -623,14 +623,6 @@ class Session:
         """
         request stream 上に GOAWAY を送信する。
         """
-    def send_namespace(self, /, request_id: int, suffix: Sequence[Sequence[int]]) -> list[Event]:
-        """
-        NAMESPACE を送信する。
-        """
-    def send_namespace_done(self, /, request_id: int, suffix: Sequence[Sequence[int]]) -> list[Event]:
-        """
-        NAMESPACE_DONE を送信する。
-        """
     def send_object_datagram(self, /, request_id: int, group_id: int, object_id: int, properties_data: Sequence[int] |None = None, status: int |None = None) -> tuple[bool, list[Event]]:
         """
         オブジェクトデータグラムを送信することを通知する。
@@ -659,14 +651,6 @@ class Session:
         自側が受け持つ subscription の応答を処理する。
 
         REQUEST_UPDATE に対して FORWARD などを変更する場合に使う。
-        """
-    def send_publish_namespace(self, /, namespace: Sequence[Sequence[int]], parameters: Any) -> list[Event]:
-        """
-        PUBLISH_NAMESPACE を送信する。
-        """
-    def send_publish_skipped(self, /, request_id: int, suffix: Sequence[Sequence[int]], track_name: Sequence[int]) -> list[Event]:
-        """
-        PUBLISH_SKIPPED を送信する。
         """
     def send_publish_state_notify(self, /, request_id: int, parameters: Any) -> list[Event]:
         """
@@ -703,17 +687,9 @@ class Session:
         """
         SUBSCRIBE を送信する。
         """
-    def send_subscribe_namespace(self, /, prefix: Sequence[Sequence[int]], parameters: Any) -> list[Event]:
-        """
-        SUBSCRIBE_NAMESPACE を送信する。
-        """
     def send_subscribe_ok(self, /, request_id: int, track_alias: int, parameters: Any, track_properties: Any) -> list[Event]:
         """
         SUBSCRIBE_OK を送信する。
-        """
-    def send_subscribe_tracks(self, /, prefix: Sequence[Sequence[int]], parameters: Any) -> list[Event]:
-        """
-        SUBSCRIBE_TRACKS を送信する。
         """
     def send_track_status(self, /, namespace: Sequence[Sequence[int]], track_name: Sequence[int], parameters: Any) -> list[Event]:
         """
