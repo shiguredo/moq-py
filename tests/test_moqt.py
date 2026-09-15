@@ -748,3 +748,68 @@ def test_decode_parameter_rejects_a_malformed_value() -> None:
     """型に合わない値のバイト列を拒否することを確認する。"""
     with pytest.raises(ValueError, match="unexpected end of buffer"):
         moqt.decode_parameter(moqt.PARAM_LOCATION_FILTER, b"\xff")
+
+
+# ─── セッションの状態 ───────────────────────────────────────
+
+
+def test_session_reports_role_and_state() -> None:
+    """Session が role と状態を報告することを確認する。"""
+    client = Session.client("c")
+    server = Session.server("s")
+
+    assert client.role() == "client"
+    assert server.role() == "server"
+    assert client.established is False
+
+    client_setup = client.start()
+    server_setup = server.start()
+    server.receive_control(client_setup)
+
+    # 自側の SETUP を送っただけでは確立しない
+    assert client.state() == "local_setup_sent"
+
+    client.receive_control(server_setup)
+
+    assert client.established is True
+    assert client.state() == "established"
+
+
+def test_session_reports_the_last_error() -> None:
+    """`last_error` が初期状態では空であることを確認する。
+
+    状態機械がセッションを閉じる理由を通知したときにだけ値が入る診断用の値である。
+    """
+    client, _server = _setup()
+
+    assert client.last_error is None
+
+
+def test_next_local_request_id_requires_an_established_session() -> None:
+    """SETUP が終わるまで `next_local_request_id` が失敗することを確認する。"""
+    client = Session.client("c")
+
+    with pytest.raises(RuntimeError, match="established"):
+        client.next_local_request_id()
+
+
+def test_next_local_request_id_advances() -> None:
+    """`next_local_request_id` が request の送信で進むことを確認する。"""
+    client, _server = _setup()
+    first = client.next_local_request_id()
+    client.send_subscribe([b"ns"], b"t", {})
+
+    assert client.next_local_request_id() > first
+
+
+def test_subscription_cleanup_ready_is_false_while_established() -> None:
+    """購読が確立している間は cleanup できないことを確認する。
+
+    cleanup できるのは Terminated 状態になった後である
+    (draft-ietf-moq-transport-21 §3.1.1 (Subscription State Management))。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    assert client.subscription_cleanup_ready(request_id) is False
+    assert client.subscription_cleanup_ready(9999) is None
