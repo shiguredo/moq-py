@@ -8,7 +8,7 @@ import logging
 import pytest
 from moqt import moqt
 from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, Subscription
-from moqt.moq._runtime import MoqtError
+from moqt.moq._runtime import MoqtError, Runtime
 from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
 
@@ -743,3 +743,40 @@ async def test_reset_subgroup_at_keeps_the_connection_usable(moq_pair: MoqPair) 
     received = await _take_objects_in_group(subscription, 2)
 
     assert [item.payload for item in received if item.group_id == 2] == [b"kept"]
+
+
+async def test_fill_parameters_open_a_fill_fetch_stream(moq_pair: MoqPair) -> None:
+    """
+    FILL_PARAMETERS 付きの購読で fill fetch stream が開かれることを確認する。
+
+    peer が過去のオブジェクトの補充を求めた場合、publisher は fill fetch stream を
+    開いて応答する (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+    """
+    opened: list[tuple[int, int]] = []
+
+    published: list[Publication] = []
+
+    async def on_fill_fetch_stream(runtime: Runtime, request_id: int, stream_id: int) -> None:
+        opened.append((request_id, stream_id))
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_fill_fetch_stream(on_fill_fetch_stream)
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    # fill の範囲は Largest Object を超えられないため、先に 1 件配信して観測させる
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+    await published[0].send_object(1, 0, b"original")
+
+    # 補充を求める購読を送る。FILL_PARAMETERS の内側は補充の範囲を指定する
+    await moq_pair.client.subscribe(
+        NAMESPACE,
+        TRACK_NAME,
+        {moqt.PARAM_FILL_PARAMETERS: {moqt.PARAM_FILL_TIMEOUT: 1000}},
+    )
+
+    await wait_until(lambda: bool(opened))
+    assert opened[0][0] >= 0
+    assert opened[0][1] >= 0

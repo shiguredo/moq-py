@@ -205,6 +205,7 @@ class RuntimeEvents:
     on_request_update: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_publish_done: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_publish_state_notify: Callable[[NativeEvent], Awaitable[None]] | None = None
+    on_fill_fetch_stream: Callable[[int], Awaitable[None]] | None = None
     on_goaway: Callable[[NativeEvent], Awaitable[None]] | None = None
     on_object: Callable[[int, NativeEvent, bytes], Awaitable[None]] | None = None
     on_fetch_end: Callable[[str, NativeEvent], Awaitable[None]] | None = None
@@ -242,6 +243,7 @@ class RuntimeEvents:
             on_request_update=wrap(self.on_request_update),
             on_publish_done=wrap(self.on_publish_done),
             on_publish_state_notify=wrap(self.on_publish_state_notify),
+            on_fill_fetch_stream=wrap(self.on_fill_fetch_stream),
             on_goaway=wrap(self.on_goaway),
             on_object=wrap(self.on_object),
             on_fetch_end=wrap(self.on_fetch_end),
@@ -559,6 +561,26 @@ class Runtime:
         if stream_id < 0:
             raise ConnectionError("failed to open a fetch stream")
         await self._apply_events(self._core.send_fetch_header(stream_id, request_id))
+        await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
+        self._local_streams.add(stream_id)
+        self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
+        self._fetch_streams[stream_id] = FetchWriter(stream_id=stream_id)
+        return stream_id
+
+    async def open_fill_fetch_stream(self, request_id: int) -> int:
+        """fill fetch stream を開き、状態機械へ登録する。
+
+        peer から FILL_PARAMETERS 付きの購読要求を受けたときに開く。FETCH_HEADER に
+        載せる Request ID は状態機械が通知した値をそのまま使う
+        (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+
+        Returns:
+            ストリーム ID
+        """
+        stream_id = await self._ops.open_uni_stream()
+        if stream_id < 0:
+            raise ConnectionError("failed to open a fill fetch stream")
+        await self._apply_events(self._core.send_fill_fetch_header(stream_id, request_id))
         await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
@@ -1107,6 +1129,10 @@ class Runtime:
             # (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
             # アプリが通知を観測できるようにする
             await self._notify(self._events.on_publish_state_notify, event)
+        elif kind == "open_fill_fetch_stream":
+            # peer が FILL_PARAMETERS 付きで購読した。fill fetch stream を開く必要がある
+            # (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+            await self._notify(self._events.on_fill_fetch_stream, event.request_id or 0)
         elif kind == "goaway":
             await self._notify(self._events.on_goaway, event)
         elif kind in {

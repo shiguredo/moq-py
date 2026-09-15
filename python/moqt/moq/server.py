@@ -275,6 +275,7 @@ class Server:
         self._request_update_callback: (
             Callable[[Runtime, int, dict[int, object]], Awaitable[None]] | None
         ) = None
+        self._fill_fetch_callback: Callable[[Runtime, int, int], Awaitable[None]] | None = None
         self._tick_task: asyncio.Task[None] | None = None
 
         self._transport.on_session_ready(self._on_session_ready)
@@ -336,6 +337,20 @@ class Server:
         コールバックで `runtime.send_request_ok(request_id)` を呼ぶ。
         """
         self._request_update_callback = callback
+
+    def on_fill_fetch_stream(
+        self,
+        callback: Callable[[Runtime, int, int], Awaitable[None]],
+    ) -> None:
+        """peer が FILL_PARAMETERS 付きで購読したときに呼ぶコールバックを設定する。
+
+        引数はランタイム、購読の Request ID、開いた fill fetch stream の ID である。
+        過去のオブジェクトを補充するには `runtime.send_fetch_stream_object` を使う。
+        fill fetch stream は購読の成立に必須ではないため、コールバックが未登録でも
+        ストリームは開かれる
+        (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+        """
+        self._fill_fetch_callback = callback
 
     async def start(self) -> None:
         """WebTransport server を開始する。"""
@@ -408,7 +423,22 @@ class Server:
             on_established=lambda: self._on_established(context),
             on_request=lambda event: self._on_request(context, event),
             on_request_update=lambda event: self._on_request_update(context, event),
+            on_fill_fetch_stream=lambda request_id: self._on_fill_fetch_stream(context, request_id),
         )
+
+    async def _on_fill_fetch_stream(self, context: ConnectionContext, request_id: int) -> None:
+        """peer が FILL_PARAMETERS 付きで購読したときに fill fetch stream を開く。
+
+        fill は購読の成立に必須ではないため、コールバックが未登録でも
+        ストリームは開く。開いたストリーム ID はアプリへ渡す。
+        """
+        connection = self._connection(context)
+        if connection is None:
+            return
+        stream_id = await connection.runtime.open_fill_fetch_stream(request_id)
+        callback = self._fill_fetch_callback
+        if callback is not None:
+            await callback(connection.runtime, request_id, stream_id)
 
     async def _on_request_update(self, context: ConnectionContext, event: NativeEvent) -> None:
         """peer からの REQUEST_UPDATE をアプリへ通知する。
