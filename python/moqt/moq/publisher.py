@@ -1,0 +1,135 @@
+"""Track を配信する側の公開 API。
+
+SUBSCRIBE_OK で確立した配信と、PUBLISH で確立した配信の両方を扱う。
+`moqt.moq.server` と `moqt.moq.client` が同じ形で参照する。
+
+`_runtime` だけに依存し、client / server のどちらからも読み込めるようにする。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from moqt import moqt
+from moqt.moq._runtime import Runtime
+
+# PUBLISH_DONE の既定コード
+# (draft-ietf-moq-transport-21 §16.11.3 (PUBLISH_DONE Codes))
+DEFAULT_PUBLISH_DONE_CODE: int = moqt.PUBLISH_DONE_TRACK_ENDED
+
+
+@dataclass(slots=True)
+class Publication:
+    """配信中の Track。"""
+
+    request_id: int
+    """PUBLISH または SUBSCRIBE の Request ID。"""
+
+    track_alias: int
+    """通知した Track Alias。"""
+
+    namespace: tuple[bytes, ...]
+    """Track Namespace。"""
+
+    track_name: bytes
+    """Track 名。"""
+
+    runtime: Runtime
+    """送信に使うランタイム。"""
+
+    _group_ids: dict[int, int] = field(default_factory=dict)
+
+    async def send_object(
+        self,
+        group_id: int,
+        object_id: int,
+        payload: bytes,
+        *,
+        subgroup_id: int | None = None,
+        publisher_priority: int | None = None,
+        end_of_group: bool = False,
+        status: int | None = None,
+        properties_data: bytes | None = None,
+    ) -> None:
+        """subgroup ストリームでオブジェクトを送信する。
+
+        `status` に `moqt.moqt.OBJECT_STATUS_END_OF_GROUP` や
+        `moqt.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
+        オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
+        (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
+
+        `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
+        Properties の有無は subgroup ヘッダで固定されるため、同じ subgroup の
+        最初のオブジェクトで決める
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+        """
+        await self.runtime.send_subgroup_object(
+            self.request_id,
+            self.track_alias,
+            group_id,
+            object_id,
+            payload,
+            subgroup_id=subgroup_id,
+            publisher_priority=publisher_priority,
+            end_of_group=end_of_group,
+            status=status,
+            properties_data=properties_data,
+        )
+
+    async def send_datagram(
+        self,
+        group_id: int,
+        object_id: int,
+        payload: bytes,
+        *,
+        publisher_priority: int | None = None,
+        properties_data: bytes | None = None,
+        status: int | None = None,
+    ) -> None:
+        """オブジェクトデータグラムを送信する。
+
+        `status` の扱いは `send_object` と同じである。
+
+        データグラムの合計サイズが `moqt.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
+        記録する。上限は経路 MTU に依存し、超えたデータグラムは通知なく破棄される
+        (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。大きいオブジェクトは
+        subgroup ストリームで送ること。
+        """
+        await self.runtime.send_object_datagram(
+            self.request_id,
+            group_id,
+            object_id,
+            payload,
+            publisher_priority,
+            properties_data,
+            status,
+        )
+
+    async def send_publish_state_notify(
+        self,
+        parameters: dict[int, object] | None = None,
+    ) -> None:
+        """PUBLISH_STATE_NOTIFY を送る。
+
+        応答は不要であり、購読側のクレジットも消費しない
+        (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
+        """
+        await self.runtime.send_publish_state_notify(self.request_id, parameters)
+
+    async def close(
+        self,
+        status_code: int = DEFAULT_PUBLISH_DONE_CODE,
+        reason: str = "",
+    ) -> None:
+        """配信を終了する。
+
+        PUBLISH_DONE を送り、送信中の subgroup ストリームも終了する。
+        """
+        await self.runtime.finish_subgroup(self.request_id)
+        await self.runtime.send_publish_done(self.request_id, status_code, reason)
+
+
+__all__ = [
+    "DEFAULT_PUBLISH_DONE_CODE",
+    "Publication",
+]

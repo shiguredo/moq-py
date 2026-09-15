@@ -3,12 +3,13 @@
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING
 
 from webtransport import h3
 
+from moqt import moqt
 from moqt.moq._runtime import (
     TICK_INTERVAL,
     MessageBody,
@@ -18,14 +19,12 @@ from moqt.moq._runtime import (
     RuntimeEvents,
     TransportOps,
 )
+from moqt.moq.publisher import Publication
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
-
-# PUBLISH_DONE のコード (draft-ietf-moq-transport-21 §16.11.3)
-PUBLISH_DONE_TRACK_ENDED = 0x2
 
 # 接続を識別する context。`RuntimeEvents.bind` がコールバックの第 1 引数に渡す。
 ConnectionContext = tuple[tuple[str, int], int]
@@ -181,14 +180,11 @@ class FetchResponse:
 
 
 @dataclass(slots=True)
-class Publication:
-    """配信中の Track。"""
+class PublisherRequest:
+    """peer から届いた PUBLISH。"""
 
     request_id: int
-    """SUBSCRIBE の Request ID。"""
-
-    track_alias: int
-    """SUBSCRIBE_OK で通知した Track Alias。"""
+    """PUBLISH の Request ID。"""
 
     namespace: tuple[bytes, ...]
     """Track Namespace。"""
@@ -196,81 +192,38 @@ class Publication:
     track_name: bytes
     """Track 名。"""
 
+    track_alias: int
+    """peer が通知した Track Alias。"""
+
+    parameters: dict[int, object]
+    """PUBLISH のパラメータ。"""
+
     runtime: Runtime
-    """送信に使うランタイム。"""
+    """応答に使うランタイム。"""
 
-    _group_ids: dict[int, int] = field(default_factory=dict)
-
-    async def send_object(
+    async def accept(
         self,
-        group_id: int,
-        object_id: int,
-        payload: bytes,
-        *,
-        subgroup_id: int | None = None,
-        publisher_priority: int | None = None,
-        end_of_group: bool = False,
-        status: int | None = None,
-        properties_data: bytes | None = None,
-    ) -> None:
-        """subgroup ストリームでオブジェクトを送信する。
+        parameters: dict[int, object] | None = None,
+        track_properties: dict[int, object] | None = None,
+    ) -> Publication:
+        """REQUEST_OK を返して配信を受け入れる。
 
-        `status` に `moqt.moqt.OBJECT_STATUS_END_OF_GROUP` や
-        `moqt.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
-        オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
-        (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
-
-        `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
-        Properties の有無は subgroup ヘッダで固定されるため、同じ subgroup の
-        最初のオブジェクトで決める
-        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+        PUBLISH の応答は REQUEST_OK であり、SUBSCRIBE_OK とは異なり Track Alias を
+        運ばない。peer が通知した Track Alias をそのまま使う
+        (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))。
         """
-        await self.runtime.send_subgroup_object(
-            self.request_id,
-            self.track_alias,
-            group_id,
-            object_id,
-            payload,
-            subgroup_id=subgroup_id,
-            publisher_priority=publisher_priority,
-            end_of_group=end_of_group,
-            status=status,
-            properties_data=properties_data,
+        await self.runtime.send_request_ok(self.request_id, parameters, track_properties)
+        return Publication(
+            request_id=self.request_id,
+            track_alias=self.track_alias,
+            namespace=self.namespace,
+            track_name=self.track_name,
+            runtime=self.runtime,
         )
 
-    async def send_datagram(
-        self,
-        group_id: int,
-        object_id: int,
-        payload: bytes,
-        *,
-        publisher_priority: int | None = None,
-        properties_data: bytes | None = None,
-        status: int | None = None,
-    ) -> None:
-        """オブジェクトデータグラムを送信する。
-
-        `status` の扱いは `send_object` と同じである。
-
-        データグラムの合計サイズが `moqt.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
-        記録する。上限は経路 MTU に依存し、超えたデータグラムは通知なく破棄される
-        (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。大きいオブジェクトは
-        subgroup ストリームで送ること。
-        """
-        await self.runtime.send_object_datagram(
-            self.request_id,
-            group_id,
-            object_id,
-            payload,
-            publisher_priority,
-            properties_data,
-            status,
-        )
-
-    async def close(self, status_code: int = PUBLISH_DONE_TRACK_ENDED, reason: str = "") -> None:
-        """配信を終了する。"""
-        await self.runtime.finish_subgroup(self.request_id)
-        await self.runtime.send_publish_done(self.request_id, status_code, reason)
+    async def reject(self, error_code: int, reason: str) -> None:
+        """REQUEST_ERROR を返して配信を拒否する。"""
+        await self.runtime.send_request_error(self.request_id, error_code, reason)
 
 
 @dataclass(slots=True)
@@ -307,6 +260,7 @@ class Server:
         self._on_session_established: Callable[[ServerSession], Awaitable[None]] | None = None
         self._on_subscribe: Callable[[SubscriptionRequest], Awaitable[None]] | None = None
         self._on_fetch: Callable[[FetchRequest], Awaitable[None]] | None = None
+        self._publish_callback: Callable[[PublisherRequest], Awaitable[None]] | None = None
         self._request_update_callback: (
             Callable[[Runtime, int, dict[int, object]], Awaitable[None]] | None
         ) = None
@@ -345,6 +299,17 @@ class Server:
     ) -> None:
         """peer から FETCH が届いたときに呼び出す非同期 callback を設定する。"""
         self._on_fetch = callback
+
+    def on_publish(
+        self,
+        callback: Callable[[PublisherRequest], Awaitable[None]],
+    ) -> None:
+        """peer から PUBLISH が届いたときに呼び出す非同期 callback を設定する。
+
+        コールバックは `PublisherRequest.accept()` で受け入れるか、`reject()` で
+        拒否する。未登録の場合は PUBLISH を REQUEST_NOT_SUPPORTED で拒否する。
+        """
+        self._publish_callback = callback
 
     def on_request_update(
         self,
@@ -492,12 +457,41 @@ class Server:
             )
             await self._on_fetch(request)
             return
-        if event.kind != "subscribe":
-            # SUBSCRIBE 以外の request は未対応として拒否する
+        if event.kind == "publish":
+            if self._publish_callback is None:
+                await runtime.send_request_error(
+                    event.request_id or 0,
+                    moqt.REQUEST_NOT_SUPPORTED,
+                    "PUBLISH is not handled by this server",
+                )
+                return
+            body = event.message
+            request = PublisherRequest(
+                request_id=event.request_id or 0,
+                namespace=_body_namespace(body, "track_namespace"),
+                track_name=_body_bytes(body, "track_name"),
+                track_alias=_body_int(body, "track_alias"),
+                parameters=_body_parameters(body),
+                runtime=runtime,
+            )
+            await self._publish_callback(request)
+            return
+        if event.kind not in {"subscribe", "track_status"}:
+            # 未対応の request は REQUEST_NOT_SUPPORTED で拒否する
             await runtime.send_request_error(
                 event.request_id or 0,
-                0x3,
+                moqt.REQUEST_NOT_SUPPORTED,
                 f"{event.kind} is not supported",
+            )
+            return
+        if event.kind == "track_status":
+            # TRACK_STATUS は relay が返す応答であり、endpoint は購読の一部として
+            # 応答できない。名前空間の探索を伴わないため DOES_NOT_EXIST を返す
+            # (moqt-rs の `recv_request` も TRACK_STATUS を受理しない)。
+            await runtime.send_request_error(
+                event.request_id or 0,
+                moqt.REQUEST_DOES_NOT_EXIST,
+                "TRACK_STATUS is not answered by an endpoint",
             )
             return
         if self._on_subscribe is None:
@@ -616,6 +610,14 @@ def _body_bytes(body: MessageBody | None, key: str) -> bytes:
     return value if isinstance(value, bytes) else b""
 
 
+def _body_int(body: MessageBody | None, key: str) -> int:
+    """メッセージ本体から整数を取り出す。"""
+    if body is None:
+        return 0
+    value = body.get(key)
+    return value if isinstance(value, int) else 0
+
+
 def _body_parameters(body: MessageBody | None) -> dict[int, object]:
     """メッセージ本体からパラメータを取り出す。"""
     if body is None:
@@ -630,6 +632,7 @@ __all__ = [
     "FetchRequest",
     "FetchResponse",
     "Publication",
+    "PublisherRequest",
     "Server",
     "ServerSession",
     "SubscriptionRequest",

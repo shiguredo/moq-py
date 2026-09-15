@@ -18,6 +18,7 @@ from moqt.moq._runtime import (
     RuntimeEvents,
     TransportOps,
 )
+from moqt.moq.publisher import Publication
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -389,6 +390,32 @@ class Client:
             subscription._push(item)
         return subscription
 
+    async def publish(
+        self,
+        namespace: Sequence[bytes],
+        track_name: bytes,
+        track_alias: int,
+        parameters: dict[int, object] | None = None,
+        track_properties: dict[int, object] | None = None,
+    ) -> Publication:
+        """Track の配信を開始する (PUBLISH)。
+
+        `track_properties` は `moqt.moqt.TrackProperties.to_dict()` の形で渡す。
+        応答 (REQUEST_OK) を受信してから `Publication` を返す。送信した
+        オブジェクトは `Publication.send_object` と `send_datagram` で送る。
+        """
+        runtime = self._require_runtime()
+        request_id, _event = await runtime.publish(
+            namespace, track_name, track_alias, parameters, track_properties
+        )
+        return Publication(
+            request_id=request_id,
+            track_alias=track_alias,
+            namespace=tuple(namespace),
+            track_name=track_name,
+            runtime=runtime,
+        )
+
     async def fetch(
         self,
         namespace: Sequence[bytes],
@@ -724,6 +751,7 @@ __all__ = [
     "Client",
     "Fetch",
     "MoqtObject",
+    "Publication",
     "Subscription",
     "TrackStatus",
 ]

@@ -9,7 +9,7 @@ import pytest
 from moqt import moqt
 from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, Subscription
 from moqt.moq._runtime import MoqtError
-from moqt.moq.server import FetchRequest, Publication, SubscriptionRequest
+from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
 
 # テストで使う Track
@@ -169,6 +169,33 @@ async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> No
     decoded, _consumed = moqt.ObjectProperties.decode(received[0].properties)
     assert decoded.prior_group_id_gap == 2
     assert decoded.object_delivery_timeout == 1000
+
+
+async def test_client_publish_and_object_delivery(moq_pair: MoqPair) -> None:
+    """
+    client が PUBLISH で配信し、送ったオブジェクトが server へ届くことを確認する。
+
+    PUBLISH の応答は REQUEST_OK であり、SUBSCRIBE_OK とは異なり Track Alias を
+    運ばない。server は peer が通知した Track Alias をそのまま使う。
+    """
+    accepted: list[PublisherRequest] = []
+
+    async def on_publish(request: PublisherRequest) -> None:
+        accepted.append(request)
+        await request.accept()
+
+    moq_pair.server.on_publish(on_publish)
+
+    publication = await moq_pair.client.publish(NAMESPACE, TRACK_NAME, TRACK_ALIAS)
+    await wait_until(lambda: bool(accepted))
+
+    assert accepted[0].namespace == tuple(NAMESPACE)
+    assert accepted[0].track_name == TRACK_NAME
+    assert accepted[0].track_alias == TRACK_ALIAS
+
+    await publication.send_object(1, 0, b"published")
+    await publication.send_datagram(1, 1, b"datagram-published")
+    await publication.close()
 
 
 async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> None:
