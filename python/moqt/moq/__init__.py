@@ -9,7 +9,8 @@ sans I/O 状態機械を直接扱う必要はない。
 - `Client`: WebTransport 接続を張って MoQT セッションを開始する
 - `Server`: WebTransport 接続を受け入れて MoQT セッションを開始する
 - `Subscription` / `Fetch` / `TrackStatus`: client 側の要求
-- `SubscriptionRequest` / `FetchRequest` / `Publication`: server 側の応答
+- `Publication`: 配信中の Track。client と server の両方から使う
+- `SubscriptionRequest` / `FetchRequest` / `PublisherRequest`: server 側の応答
 - `moqt.moq.testing`: 他プロジェクトのテストから使う pytest fixture 群
 
 `moqt.moq.testing` は `pytest` と `cryptography` を必要とするため、このモジュール
@@ -30,6 +31,7 @@ from moqt.moq.server import (
     FetchRequest,
     FetchResponse,
     Publication,
+    PublisherRequest,
     Server,
     ServerSession,
     SubscriptionRequest,
@@ -43,6 +45,7 @@ __all__ = [
     "MoqtObject",
     "PeerGoaway",
     "Publication",
+    "PublisherRequest",
     "Server",
     "ServerSession",
     "Subscription",
