@@ -1,8 +1,8 @@
-//! `moq` のネイティブ拡張。
+//! `moqt` のネイティブ拡張。
 //!
 //! `moqt-rs` の codec と sans I/O セッション状態機械を PyO3 経由で公開する。
-//! Python 側の公開 API は `moq.moqt` / `moq.loc` / `moq.msf` の 3 モジュールであり、
-//! この拡張モジュール (`moq._native`) はその実体である。
+//! Python 側の公開 API は `moqt.moqt` / `moqt.loc` / `moqt.msf` の 3 モジュールであり、
+//! この拡張モジュール (`moqt._native`) はその実体である。
 //!
 //! # 役割分担
 //!
@@ -20,7 +20,7 @@ mod msf;
 
 use pyo3::prelude::*;
 
-/// Python から `import moq._native` される拡張モジュール。
+/// Python から `import moqt._native` される拡張モジュール。
 #[pymodule(gil_used = false, name = "_native")]
 mod _native {
     use pyo3::prelude::*;
@@ -48,7 +48,7 @@ mod _native {
         PADDING_DATAGRAM_TYPE, PADDING_STREAM_TYPE, SETUP_STREAM_TYPE,
     };
 
-    // MoQT のプロトコル層 (moq.moqt)
+    // MoQT のプロトコル層 (moqt.moqt)
     #[pymodule_export]
     use crate::codec::{
         Message, classify_data_stream_type, decode_message, decode_varint, decode_varint_prefix,
@@ -57,11 +57,11 @@ mod _native {
     #[pymodule_export]
     use crate::core::{CoreEvent, CoreSession};
 
-    // LOC の codec (moq.loc)
+    // LOC の codec (moqt.loc)
     #[pymodule_export]
     use crate::loc::LocProperties;
 
-    // MSF の codec (moq.msf)
+    // MSF の codec (moqt.msf)
     #[pymodule_export]
     use crate::msf::{
         Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri, parse_fragment_pairs,

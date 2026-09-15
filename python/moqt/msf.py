@@ -10,8 +10,8 @@ delta 更新の適用を担う。
 MSF は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
-from moq import _native
-from moq._native import (
+from moqt import _native
+from moqt._native import (
     Catalog,
     DeltaUpdate,
     EventTimeline,

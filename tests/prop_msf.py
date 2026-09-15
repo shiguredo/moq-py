@@ -1,10 +1,10 @@
-"""`moq.msf` のカタログとタイムラインに対する Property-Based Testing。"""
+"""`moqt.msf` のカタログとタイムラインに対する Property-Based Testing。"""
 
 import json
 
 from hypothesis import given
 from hypothesis import strategies as st
-from moq.msf import Catalog, EventTimeline, MediaTimeline
+from moqt.msf import Catalog, EventTimeline, MediaTimeline
 
 # MSF のタイムラインが運ぶ値の範囲。Group ID と Object ID は vi64 の全域を取る。
 TIMELINE_FIELDS = st.integers(min_value=0, max_value=2**62 - 1)

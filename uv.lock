@@ -190,7 +190,7 @@ wheels = [
 ]
 
 [[package]]
-name = "moq-py"
+name = "moqt-py"
 version = "2026.0.0"
 source = { editable = "." }
 dependencies = [

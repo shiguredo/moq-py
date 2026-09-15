@@ -1,4 +1,4 @@
-//! MSF (MOQT Streaming Format) の codec (`moq.msf`)。
+//! MSF (MOQT Streaming Format) の codec (`moqt.msf`)。
 //!
 //! draft-ietf-moq-msf-01 のカタログ・メディアタイムライン・イベントタイムライン・
 //! URI を Python から扱う。この仕様は draft 由来であり、将来の改訂で変更される

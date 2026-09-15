@@ -1,8 +1,8 @@
-"""`moq.moqt` の sans I/O セッション状態機械に対する Property-Based Testing。"""
+"""`moqt.moqt` の sans I/O セッション状態機械に対する Property-Based Testing。"""
 
 from hypothesis import given
 from hypothesis import strategies as st
-from moq.moqt import PUBLISHER_PRIORITY_DEFAULT, Session, encode_varint
+from moqt.moqt import PUBLISHER_PRIORITY_DEFAULT, Session, encode_varint
 
 # Object Status の Normal (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
 OBJECT_STATUS_NORMAL = 0x0
@@ -36,8 +36,8 @@ def _split(data: bytes, sizes: list[int]) -> list[bytes]:
 
 def _establish() -> tuple[Session, Session, int]:
     """SETUP と SUBSCRIBE を終えた client / server と Request ID を返す。"""
-    client = Session.client("moq-py-test-client")
-    server = Session.server("moq-py-test-server")
+    client = Session.client("moqt-py-test-client")
+    server = Session.server("moqt-py-test-server")
     client_setup = client.start()
     server_setup = server.start()
     server.receive_control(client_setup)
@@ -121,8 +121,8 @@ def prop_setup_establishes_for_arbitrary_stream_fragmentation(
     server_sizes: list[int],
 ) -> None:
     """SETUP が任意の stream fragment 境界でも client/server 双方で成立する。"""
-    client = Session.client("moq-py-test-client")
-    server = Session.server("moq-py-test-server")
+    client = Session.client("moqt-py-test-client")
+    server = Session.server("moqt-py-test-server")
     client_setup = client.start()
     server_setup = server.start()
 

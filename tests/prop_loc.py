@@ -1,9 +1,9 @@
-"""`moq.loc` のプロパティ codec に対する Property-Based Testing。"""
+"""`moqt.loc` のプロパティ codec に対する Property-Based Testing。"""
 
 from hypothesis import given
 from hypothesis import strategies as st
-from moq import loc
-from moq.loc import Properties
+from moqt import loc
+from moqt.loc import Properties
 
 # ライブラリが値域や長さを検査しない未知のプロパティ ID を使う。
 # 既知 ID の制約 (Audio Level は 8 bit、Video Frame Marking は 1-4 バイト) に

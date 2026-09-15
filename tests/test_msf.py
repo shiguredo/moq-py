@@ -1,10 +1,10 @@
-"""`moq.msf` のカタログとタイムラインの codec テスト。"""
+"""`moqt.msf` のカタログとタイムラインの codec テスト。"""
 
 import json
 
 import pytest
-from moq import msf
-from moq.msf import Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri
+from moqt import msf
+from moqt.msf import Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri
 
 # このライブラリが対応する MSF のバージョン (draft-ietf-moq-msf-01 §5.1.1)。
 SUPPORTED_VERSION = "draft-01"

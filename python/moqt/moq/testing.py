@@ -1,10 +1,10 @@
-"""他プロジェクトのテストから moq-py を使うための pytest fixture 群。
+"""他プロジェクトのテストから moqt-py を使うための pytest fixture 群。
 
 ``conftest.py`` (pytest の rootdir に置くもの) で次のように宣言すると使える。
 
 .. code-block:: python
 
-    pytest_plugins = ["moq.testing"]
+    pytest_plugins = ["moqt.moq.testing"]
 
 非同期 fixture を含むため ``pytest-asyncio`` が必要である。``asyncio_mode`` は
 ``auto`` でも ``strict`` でも動作する。
@@ -34,8 +34,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from moq.client import Client
-from moq.server import Server, ServerSession
+from moqt.moq.client import Client
+from moqt.moq.server import Server, ServerSession
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable

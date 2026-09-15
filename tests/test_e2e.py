@@ -1,16 +1,18 @@
 """webtransport-py と moqt-rs を接続する実通信テスト。"""
 
 import importlib
+import importlib.util
 import logging
 
 import pytest
-from moq import Client, Fetch, MoqtObject, Server, Subscription, moqt
-from moq._runtime import MoqtError
-from moq.server import FetchRequest, Publication, SubscriptionRequest
-from moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
+from moqt import moqt
+from moqt.moq import Client, Fetch, MoqtObject, Server, Subscription
+from moqt.moq._runtime import MoqtError
+from moqt.moq.server import FetchRequest, Publication, SubscriptionRequest
+from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
 
 # テストで使う Track
-NAMESPACE = [b"moq-py", b"test"]
+NAMESPACE = [b"moqt-py", b"test"]
 TRACK_NAME = b"video"
 TRACK_ALIAS = 1
 
@@ -102,6 +104,33 @@ async def test_subscribe_and_receive_objects_over_subgroup(moq_pair: MoqPair) ->
     assert [item.group_id for item in received] == [3, 3]
     assert [item.object_id for item in received] == [0, 1]
     assert [item.payload for item in received] == [b"first", b"second"]
+
+
+async def test_object_published_right_after_subscribe_ok_is_delivered(moq_pair: MoqPair) -> None:
+    """
+    SUBSCRIBE_OK の直後に送ったオブジェクトが取りこぼされないことを確認する。
+
+    data stream は Request ID ではなく Track Alias で購読を特定する。状態機械が
+    SUBSCRIBE_OK を処理してから client が購読を登録するまでの間に届いた
+    オブジェクトも、購読が確定した時点で渡さなければならない。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        # 応答と同じコールバックの中で送る。購読の登録が追いついていない間に
+        # 届く可能性がある最も早いタイミングである
+        publication = await request.subscribe_ok(TRACK_ALIAS)
+        published.append(publication)
+        await publication.send_object(1, 0, b"immediate")
+        await publication.send_object(1, 1, b"immediate-2")
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+
+    received = await _take_objects(subscription, 2)
+
+    assert [item.payload for item in received] == [b"immediate", b"immediate-2"]
 
 
 @pytest.mark.parametrize(
@@ -373,7 +402,7 @@ async def test_datagram_size_is_reported_before_sending(
     # MoQT のヘッダもデータグラムに含まれるため、ペイロードは上限と同じか半分にする
     payload_size = moqt.MAX_DATAGRAM_SIZE if oversized else moqt.MAX_DATAGRAM_SIZE // 2
 
-    with caplog.at_level(logging.WARNING, logger="moq._runtime"):
+    with caplog.at_level(logging.WARNING, logger="moqt.moq._runtime"):
         await published[0].send_datagram(1, 0, bytes(payload_size))
 
     reported = "exceeds the portable limit" in caplog.text
@@ -445,13 +474,35 @@ async def test_fetch_receives_objects(moq_pair: MoqPair) -> None:
     ]
 
 
-def test_public_names_are_exported_from_the_package_root() -> None:
+def test_low_level_names_are_exported_from_the_package_root() -> None:
     """
-    `moq` の `__all__` に挙げた名前がすべて取り出せることを確認する。
+    `moqt` の `__all__` に挙げた名前がすべて取り出せることを確認する。
 
-    利用者が `moq.client` や `moq.server` ではなく `moq` から import できる
-    ことを検証する。
+    利用者が `moqt.moqt` や `moqt.loc` ではなく `moqt` から import できることを
+    検証する。
     """
-    package = importlib.import_module("moq")
+    package = importlib.import_module("moqt")
     for name in package.__all__:
         assert getattr(package, name, None) is not None, name
+
+
+def test_high_level_names_are_exported_from_moqt_moq() -> None:
+    """
+    `moqt.moq` の `__all__` に挙げた名前がすべて取り出せることを確認する。
+
+    利用者が `moqt.moq.client` や `moqt.moq.server` ではなく `moqt.moq` から
+    import できることを検証する。
+    """
+    package = importlib.import_module("moqt.moq")
+    for name in package.__all__:
+        assert getattr(package, name, None) is not None, name
+
+
+def test_legacy_moq_package_is_not_installed() -> None:
+    """
+    改名前の `moq` パッケージが残っていないことを確認する。
+
+    互換シムを置かない方針であるため、`moq` が import できる状態は改名の
+    取りこぼしである。
+    """
+    assert importlib.util.find_spec("moq") is None

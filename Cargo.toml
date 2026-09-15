@@ -1,11 +1,11 @@
 [package]
-name = "moq-py"
+name = "moqt-py"
 version = "2026.0.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Python client and server library for Media over QUIC over WebTransport"
 readme = "README.md"
-repository = "https://github.com/shiguredo/moq-py"
+repository = "https://github.com/shiguredo/moqt-py"
 license = "Apache-2.0"
 publish = false
 

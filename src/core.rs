@@ -12,7 +12,7 @@
 //! 対応する `receive_*` を呼ぶ。Rust 側は自側が送るべきバイト列をイベントとして
 //! 返し、ストリームの実体には触れない。
 //!
-//! `moq.moqt` が公開する `Session` と `Event` はこのモジュールの [`CoreSession`] と
+//! `moqt.moqt` が公開する `Session` と `Event` はこのモジュールの [`CoreSession`] と
 //! [`CoreEvent`] である。
 
 use std::collections::{HashMap, HashSet};
@@ -1459,14 +1459,14 @@ fn request_stream_end(
 impl CoreSession {
     /// client role の MoQT Session を作成する。
     #[staticmethod]
-    #[pyo3(signature = (implementation="moq-py"))]
+    #[pyo3(signature = (implementation="moqt-py"))]
     fn client(implementation: &str) -> PyResult<Self> {
         Self::new(true, implementation)
     }
 
     /// server role の MoQT Session を作成する。
     #[staticmethod]
-    #[pyo3(signature = (implementation="moq-py"))]
+    #[pyo3(signature = (implementation="moqt-py"))]
     fn server(implementation: &str) -> PyResult<Self> {
         Self::new(false, implementation)
     }

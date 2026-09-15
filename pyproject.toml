@@ -3,7 +3,7 @@ requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "moq-py"
+name = "moqt-py"
 version = "2026.0.0"
 description = "Python client and server library for Media over QUIC over WebTransport"
 readme = "README.md"
@@ -23,13 +23,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 他プロジェクトのテストから moq.testing の fixture を使うための依存
+# 他プロジェクトのテストから moqt.moq.testing の fixture を使うための依存
 testing = [
-  # moq.testing の pytest fixture
+  # moqt.moq.testing の pytest fixture
   "pytest>=9.0,<10",
-  # moq.testing の非同期 fixture
+  # moqt.moq.testing の非同期 fixture
   "pytest-asyncio>=1.4,<2",
-  # moq.testing.generate_certificates の自己署名証明書生成
+  # moqt.moq.testing.generate_certificates の自己署名証明書生成
   "cryptography>=50.0,<51",
 ]
 
@@ -49,7 +49,7 @@ dev = [
 
 [tool.maturin]
 python-source = "python"
-module-name = "moq._native"
+module-name = "moqt._native"
 manifest-path = "Cargo.toml"
 
 [tool.uv]
@@ -58,7 +58,7 @@ python-preference = "only-managed"
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-extend-exclude = ["python/moq/_native.pyi"]
+extend-exclude = ["python/moqt/_native.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "PT", "ANN", "RUF"]

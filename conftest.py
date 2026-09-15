@@ -1,6 +1,6 @@
-"""moq-py 自身のテストで使う pytest 設定。
+"""moqt-py 自身のテストで使う pytest 設定。
 
-公開している `moq.testing` の fixture を、利用者と同じ手順で読み込む。
+公開している `moqt.moq.testing` の fixture を、利用者と同じ手順で読み込む。
 """
 
-pytest_plugins = ["moq.testing"]
+pytest_plugins = ["moqt.moq.testing"]

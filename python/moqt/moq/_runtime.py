@@ -1,12 +1,12 @@
 """MoQT セッションと WebTransport ストリームを接続する内部ランタイム。
 
-このモジュールは公開 API ではない。`moq.client` と `moq.server` が共通で使う
-ストリーム振り分けとイベント処理をまとめる。
+このモジュールは公開 API ではない。`moqt.moq.client` と `moqt.moq.server` が
+共通で使うストリーム振り分けとイベント処理をまとめる。
 
 役割分担は次のとおりである。
 
 - `webtransport.h3` がストリームとデータグラムの I/O を担当する
-- `moq._native` が MoQT のプロトコル状態機械とメッセージのデコードを担当する
+- `moqt._native` が MoQT のプロトコル状態機械とメッセージのデコードを担当する
 - このランタイムが両者を接続し、ストリーム ID と Request ID の対応を保持する
 
 応答メッセージはワイヤに Request ID を含まないため、ストリームと Request ID の
@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from moq import _native, moqt
+from moqt import _native, moqt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -31,7 +31,7 @@ MessageBody = dict[str, object]
 
 
 class NativeEvent(Protocol):
-    """`moq._native` が返すイベントの構造。
+    """`moqt._native` が返すイベントの構造。
 
     ネイティブ拡張の型を Python 側で再定義せずに型検査を通すため、
     必要な属性だけを構造として表す。
@@ -1157,7 +1157,7 @@ def _is_bidirectional(stream_id: int) -> bool:
 def _decode_first_varint(data: bytes) -> int | None:
     """先頭の vi64 の値だけを返す。途中で切れている場合は `None` を返す。
 
-    vi64 のデコードは `moq.moqt` が担う。ストリーム種別の判定では値だけが必要で、
+    vi64 のデコードは `moqt.moqt` が担う。ストリーム種別の判定では値だけが必要で、
     未完成かどうかは `None` で表す。
     """
     decoded = moqt.decode_varint_prefix(data)

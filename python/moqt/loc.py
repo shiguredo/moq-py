@@ -12,8 +12,8 @@ Properties に、Private は MOQT の Object Payload に置かれる
 LOC は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
-from moq import _native
-from moq._native import LocProperties as Properties
+from moqt import _native
+from moqt._native import LocProperties as Properties
 
 # LOC プロパティ ID (draft-ietf-moq-loc-04 §2.3)
 

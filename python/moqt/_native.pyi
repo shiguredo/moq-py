@@ -1,5 +1,5 @@
 """
-Python から `import moq._native` される拡張モジュール。
+Python から `import moqt._native` される拡張モジュール。
 """
 
 from _typeshed import Incomplete
@@ -465,7 +465,7 @@ class Session:
     relay 全体の routing / fan-out / cache / policy は扱わない。
     """
     @staticmethod
-    def client(implementation: str = "moq-py") -> Session:
+    def client(implementation: str = "moqt-py") -> Session:
         """
         client role の MoQT Session を作成する。
         """
@@ -720,7 +720,7 @@ class Session:
         TRACK_STATUS を送信する。
         """
     @staticmethod
-    def server(implementation: str = "moq-py") -> Session:
+    def server(implementation: str = "moqt-py") -> Session:
         """
         server role の MoQT Session を作成する。
         """

@@ -1,8 +1,8 @@
-"""`moq.loc` のプロパティ codec のテスト。"""
+"""`moqt.loc` のプロパティ codec のテスト。"""
 
 import pytest
-from moq import loc
-from moq.loc import Properties
+from moqt import loc
+from moqt.loc import Properties
 
 # プロパティ ID の偶奇で値の型が決まる
 # (draft-ietf-moq-loc-04 §2.3)。

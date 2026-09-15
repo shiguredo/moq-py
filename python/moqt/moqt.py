@@ -4,15 +4,15 @@ draft-ietf-moq-transport-21 の codec と sans I/O セッション状態機械�
 この層はストリームの実体に触れない。呼び出し側が peer のストリーム種別を判定して
 `Session.receive_*` を呼び、戻り値の `Event` に従ってバイト列を送る。
 
-WebTransport を介した client / server は `moq.Client` と `moq.Server` が提供する。
+WebTransport を介した client / server は `moqt.moq` が提供する。
 このモジュールは、ワイヤのバイト列を直接組み立てて検証するテストや、実装が送出した
 バイト列を検査するテストから使う。
 
 MoQT は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
-from moq import _native
-from moq._native import (
+from moqt import _native
+from moqt._native import (
     Event,
     Message,
     Session,
@@ -107,7 +107,7 @@ OBJECT_STATUS_END_OF_TRACK: int = _native.OBJECT_STATUS_END_OF_TRACK
 # (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
 #
 # 経路 MTU が大きい場合 (典型的な Ethernet では 1500 バイト) はこれを超える
-# データグラムも配送できるが、その上限は moq-py からは知り得ない。
+# データグラムも配送できるが、その上限は moqt-py からは知り得ない。
 MAX_DATAGRAM_SIZE: int = 1100
 """経路に依存せず配送できるデータグラムの合計サイズ (ヘッダを含む)。"""
 

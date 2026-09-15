@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from webtransport import h3
 
-from moq._runtime import (
+from moqt.moq._runtime import (
     TICK_INTERVAL,
     MessageBody,
     MoqtError,
@@ -199,8 +199,8 @@ class Publication:
     ) -> None:
         """subgroup ストリームでオブジェクトを送信する。
 
-        `status` に `moq.moqt.OBJECT_STATUS_END_OF_GROUP` や
-        `moq.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
+        `status` に `moqt.moqt.OBJECT_STATUS_END_OF_GROUP` や
+        `moqt.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
         オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
         (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
         """
@@ -230,7 +230,7 @@ class Publication:
 
         `status` の扱いは `send_object` と同じである。
 
-        データグラムの合計サイズが `moq.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
+        データグラムの合計サイズが `moqt.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
         記録する。上限は経路 MTU に依存し、超えたデータグラムは通知なく破棄される
         (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。大きいオブジェクトは
         subgroup ストリームで送ること。
@@ -271,7 +271,7 @@ class Server:
         certfile: str,
         keyfile: str,
         allowed_origins: list[str] | None = None,
-        implementation: str = "moq-py",
+        implementation: str = "moqt-py",
     ) -> None:
         self._transport = h3.Server(
             host=host,

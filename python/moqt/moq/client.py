@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from webtransport import h3
 
-from moq._runtime import (
+from moqt.moq._runtime import (
     TICK_INTERVAL,
     MessageBody,
     MoqtError,
@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
 logger = logging.getLogger(__name__)
+
+# 購読が未登録の Track Alias 宛てに保持するオブジェクトの上限。
+#
+# 状態機械が SUBSCRIBE_OK を処理してから Client が購読を登録するまでの間だけ
+# 保持すればよいため、通常は数件に収まる。上限に達するのは購読が成立しないまま
+# オブジェクトが届き続けている場合だけである。
+MAX_PENDING_OBJECTS_PER_ALIAS = 1024
 
 
 @dataclass(slots=True)
@@ -201,7 +208,7 @@ class Client:
         verify_peer: bool = True,
         origin: str = "",
         ca_file: str | None = None,
-        implementation: str = "moq-py",
+        implementation: str = "moqt-py",
     ) -> None:
         self._transport = h3.Client(
             url=url,
@@ -217,6 +224,7 @@ class Client:
         self._tick_task: asyncio.Task[None] | None = None
         self._subscriptions: dict[int, Subscription] = {}
         self._subscriptions_by_alias: dict[int, Subscription] = {}
+        self._pending_objects: dict[int, list[MoqtObject]] = {}
         self._announcements: dict[int, Announcement] = {}
         self._fetches: dict[int, Fetch] = {}
 
@@ -278,6 +286,7 @@ class Client:
             with contextlib.suppress(Exception):
                 await runtime.close()
             self._runtime = None
+        self._pending_objects.clear()
         await self._transport.close()
         if self._run_task is not None:
             try:
@@ -310,6 +319,9 @@ class Client:
         )
         self._subscriptions[request_id] = subscription
         self._subscriptions_by_alias[track_alias] = subscription
+        # SUBSCRIBE_OK の処理より先に届いていたオブジェクトを購読へ渡す
+        for item in self._pending_objects.pop(track_alias, []):
+            subscription._push(item)
         return subscription
 
     async def subscribe_namespace(
@@ -479,36 +491,48 @@ class Client:
         記録した値を使う。
         """
         track_alias = event.track_alias
+        item = MoqtObject(
+            stream_id=stream_id,
+            group_id=event.group_id or 0,
+            object_id=event.object_id or 0,
+            payload=payload,
+            status=event.status,
+        )
         if track_alias is None:
             # fetch stream のオブジェクトは Track Alias を持たない
             for fetch in self._fetches.values():
-                fetch._push(
-                    MoqtObject(
-                        stream_id=stream_id,
-                        group_id=event.group_id or 0,
-                        object_id=event.object_id or 0,
-                        payload=payload,
-                        status=event.status,
-                    )
-                )
+                fetch._push(item)
             return
         subscription = self._subscriptions_by_alias.get(track_alias)
         if subscription is None:
+            # 状態機械が SUBSCRIBE_OK を処理してから Client が購読を登録するまでの間に
+            # 届いたオブジェクトである。購読が決まるまで保持する
+            self._buffer_object(track_alias, item)
             return
-        subscription._push(
-            MoqtObject(
-                stream_id=stream_id,
-                group_id=event.group_id or 0,
-                object_id=event.object_id or 0,
-                payload=payload,
-                status=event.status,
+        subscription._push(item)
+
+    def _buffer_object(self, track_alias: int, item: MoqtObject) -> None:
+        """購読が未登録の Track Alias 宛てのオブジェクトを保持する。
+
+        保持する数には上限を設ける。上限に達するのは、購読が成立しないまま
+        オブジェクトが届き続けている場合だけである。
+        """
+        pending = self._pending_objects.setdefault(track_alias, [])
+        if len(pending) >= MAX_PENDING_OBJECTS_PER_ALIAS:
+            logger.warning(
+                "MoQT dropped an object for track alias %d: "
+                "no subscription is registered and %d objects are already buffered",
+                track_alias,
+                MAX_PENDING_OBJECTS_PER_ALIAS,
             )
-        )
+            pending.pop(0)
+        pending.append(item)
 
     async def _on_request_terminated(self, event: NativeEvent) -> None:
         subscription = self._subscriptions.pop(event.request_id, None)
         if subscription is not None:
             self._subscriptions_by_alias.pop(subscription.track_alias, None)
+            self._pending_objects.pop(subscription.track_alias, None)
             subscription._finish()
         fetch = self._fetches.pop(event.request_id, None)
         if fetch is not None:

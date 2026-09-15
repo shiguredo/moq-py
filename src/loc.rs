@@ -1,4 +1,4 @@
-//! LOC (Low Overhead Media Container) のプロパティ codec (`moq.loc`)。
+//! LOC (Low Overhead Media Container) のプロパティ codec (`moqt.loc`)。
 //!
 //! draft-ietf-moq-loc-04 の LOC Properties を Python から encode / decode する。
 //! この仕様は draft 由来であり、将来の改訂で変更される可能性がある。

@@ -1,7 +1,7 @@
-"""`moq.moqt` の codec と sans I/O セッション状態機械のテスト。"""
+"""`moqt.moqt` の codec と sans I/O セッション状態機械のテスト。"""
 
 import pytest
-from moq.moqt import (
+from moqt.moqt import (
     PADDING_DATAGRAM_TYPE,
     Event,
     Session,
@@ -145,7 +145,7 @@ def test_start_emits_control_stream_type_and_implementation_option() -> None:
     Type (vi64) + Length (u16 big-endian) + Message Body が続く。
     実装名は SETUP の MOQT_IMPLEMENTATION option で通知する。
     """
-    implementation = "moq-py-test"
+    implementation = "moqt-py-test"
     session = Session.client(implementation)
     data = session.start()
 
@@ -170,8 +170,8 @@ def test_receive_control_waits_for_the_complete_setup_message() -> None:
     WebTransport の受信 fragment 境界は MoQT メッセージ境界と一致しないため、
     途中まで受信した制御メッセージは保持して続きの到着を待つ。
     """
-    client = Session.client("moq-py-test-client")
-    server = Session.server("moq-py-test-server")
+    client = Session.client("moqt-py-test-client")
+    server = Session.server("moqt-py-test-server")
     client.start()
     server_setup = server.start()
 
@@ -191,7 +191,7 @@ def test_receive_control_rejects_an_unexpected_stream_type() -> None:
 
     制御ストリームの stream type は SETUP (0x2F00) でなければならない。
     """
-    client = Session.client("moq-py-test-client")
+    client = Session.client("moqt-py-test-client")
     client.start()
 
     # stream type 0x00 は制御ストリームでもデータストリームでもない。
@@ -315,10 +315,10 @@ def test_decode_message_reads_a_setup_from_the_wire() -> None:
     """
     制御ストリームの生バイト列から SETUP をデコードできることを確認する。
 
-    `moq.moqt.decode_message` はセッションを介さずにメッセージ 1 件を取り出す。
+    `moqt.moqt.decode_message` はセッションを介さずにメッセージ 1 件を取り出す。
     制御ストリームの先頭 2 バイトは stream type であるため読み飛ばす。
     """
-    server = Session.server("moq-py-test-server")
+    server = Session.server("moqt-py-test-server")
     data = server.start()
 
     # 先頭 2 バイトは制御ストリームの stream type (0x2F00) である。
@@ -329,7 +329,7 @@ def test_decode_message_reads_a_setup_from_the_wire() -> None:
     # SETUP は request ではないため Request ID を持たない。
     assert message.request_id is None
     assert message.raw == data[2 : 2 + consumed]
-    assert b"moq-py-test-server" in data[2:]
+    assert b"moqt-py-test-server" in data[2:]
 
 
 def test_decode_message_consumes_exactly_one_message() -> None:
@@ -340,7 +340,7 @@ def test_decode_message_consumes_exactly_one_message() -> None:
     次のメッセージの位置が分かる必要がある。
     """
     client = Session.client("c")
-    server = Session.server("moq-py-test-server")
+    server = Session.server("moqt-py-test-server")
     client_setup = client.start()
     server_setup = server.start()
     server.receive_control(client_setup)
@@ -367,7 +367,7 @@ def test_decode_message_rejects_a_truncated_message() -> None:
 
     エラーメッセージには期待バイト数と実際のバイト数が入る。
     """
-    data = Session.server("moq-py-test-server").start()[2:]
+    data = Session.server("moqt-py-test-server").start()[2:]
     truncated = data[:-1]
 
     with pytest.raises(
@@ -393,7 +393,7 @@ def test_message_equality_is_based_on_the_wire_bytes() -> None:
     `Message` は frozen な値オブジェクトであり、テストで受信結果を
     期待値と比較するために使う。
     """
-    data = Session.server("moq-py-test-server").start()[2:]
+    data = Session.server("moqt-py-test-server").start()[2:]
 
     first, _ = decode_message(data)
     second, _ = decode_message(data)
