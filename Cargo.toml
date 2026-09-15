@@ -15,10 +15,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python バインディングと型スタブ生成用の introspection
-pyo3 = { version = "0.29", features = [
-  "extension-module",
-  "experimental-inspect"
-] }
+pyo3 = { version = "0.29", features = ["extension-module", "experimental-inspect"] }
 # MoQT の Sans I/O codec と Session 状態機械
 # 公開リポジトリにタグ付けされたリリースがまだ存在しないため develop ブランチを
 # 追従する。実際にビルドしたコミットは Cargo.lock が固定する。最新へ更新するときは

@@ -1,76 +1,129 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+# 最初に失敗したフックで残りをスキップする
+fail_fast = true
+# stages 未指定のフックは pre-commit でだけ実行される
+default_stages = ["pre-commit"]
+# prek install で pre-commit と pre-push の両方の Git フックを入れる
+default_install_hook_types = ["pre-commit", "pre-push"]
+# ビルド成果物と仮想環境は対象外にする
+exclude = { glob = ["target/**", ".venv/**", "dist/**"] }
+
+# prek 組み込みフック (オフラインで動作する Rust ネイティブ実装)
 [[repos]]
 repo = "builtin"
 hooks = [
-  { id = "check-merge-conflict" },
-  { id = "end-of-file-fixer" },
-  { id = "mixed-line-ending" },
+  # 行末の空白を取り除く
   { id = "trailing-whitespace" },
+  # ファイル末尾を改行 1 つで終わらせる
+  { id = "end-of-file-fixer" },
+  # ファイル先頭の UTF-8 BOM を取り除く
+  { id = "fix-byte-order-marker" },
+  # TOML / YAML / JSON の構文エラーを検出する
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "check-json" },
+  # マージコンフリクトマーカーが残ったコミットを防ぐ
+  { id = "check-merge-conflict" },
+  # 大文字小文字だけが異なるファイル名の衝突を防ぐ
+  { id = "check-case-conflict" },
+  # 大きなファイルの誤コミットを防ぐ
+  { id = "check-added-large-files" },
+  # 秘密鍵の誤コミットを防ぐ
+  { id = "detect-private-key" },
+  # 改行コードの混在を防ぐ
+  { id = "mixed-line-ending" },
+  # リンク切れのシンボリックリンクを検出する
+  { id = "check-symlinks" },
+  # シンボリックリンクだったファイルが実体ファイルとしてコミットされるのを検出する
+  { id = "destroyed-symlinks" },
 ]
 
+# tombi: TOML のフォーマッタ・リンタ
+# rev は prek auto-update で更新する
+[[repos]]
+repo = "https://github.com/tombi-toml/tombi-pre-commit"
+rev = "v1.5.5"
+hooks = [
+  # ロックファイルは自動生成されるため tombi の対象外にする
+  { id = "tombi-lint", exclude = { glob = ["**/Cargo.lock", "**/uv.lock"] } },
+  { id = "tombi-format", exclude = { glob = ["**/Cargo.lock", "**/uv.lock"] } },
+]
+
+# ruff: フォーマッタ・リンタ
+# ruff のバイナリはフックが自前で用意するため、pyproject.toml の依存には含めない
+# rev がそのまま ruff のバージョンになる。更新は prek auto-update で行う
+# 設定は pyproject.toml の [tool.ruff] を読む
+# ruff-format は Markdown 内の Python コードブロックも整形対象に含む
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.16.7"
+hooks = [
+  # ruff format: フォーマッタ
+  { id = "ruff-format", priority = 0 },
+  # ruff check: リンタ
+  { id = "ruff-check", priority = 10 },
+]
+
+# ty: 静的型チェッカ
+# ty のバイナリはフックが自前で用意するため、pyproject.toml の依存には含めない
+# rev がそのまま ty のバージョンになる。更新は prek auto-update で行う
+# フックは uv check 経由で動き、pyproject.toml の依存を解決してから型検査する
+# 変更ファイルの有無に関わらず常にプロジェクト全体を検査する
+# 既定で uv.lock / .venv を作成・更新する。副作用を避けたい場合は args = ["--isolated"] を付ける
+[[repos]]
+repo = "https://github.com/astral-sh/ty-pre-commit"
+rev = "v0.0.81"
+hooks = [
+  { id = "ty", priority = 20 },
+]
+
+# プロジェクト固有のローカルフック
+# priority が小さいほど先に実行される。同じ priority なら並列実行される
 [[repos]]
 repo = "local"
 
+# --all でワークスペース全体を対象にし、--check で書き換えずに未フォーマットを検出だけする
 [[repos.hooks]]
 id = "cargo-fmt"
 name = "cargo fmt"
+entry = "cargo fmt --all -- --check"
 language = "system"
-entry = "cargo fmt -- --check"
-files = "\\.rs$"
+types = ["rust"]
 pass_filenames = false
+priority = 0
 
+# --all-targets でテストも lint し、-D warnings で警告をエラーに昇格する
 [[repos.hooks]]
 id = "cargo-clippy"
 name = "cargo clippy"
-language = "system"
 entry = "cargo clippy --all-targets --all-features -- -D warnings"
-files = "\\.rs$"
-pass_filenames = false
-
-[[repos.hooks]]
-id = "ruff-format"
-name = "ruff format"
 language = "system"
-entry = "uv run ruff format --check ."
-files = "\\.py$"
+types = ["rust"]
 pass_filenames = false
+priority = 10
 
-[[repos.hooks]]
-id = "ruff-check"
-name = "ruff check"
-language = "system"
-entry = "uv run ruff check ."
-files = "\\.py$"
-pass_filenames = false
-
-[[repos.hooks]]
-id = "ty-check"
-name = "ty check"
-language = "system"
-entry = "uv run ty check"
-files = "\\.py(i)?$"
-pass_filenames = false
-
-[[repos.hooks]]
-id = "tombi-format"
-name = "tombi format"
-language = "system"
-entry = "tombi format --check"
-files = "\\.toml$"
-pass_filenames = false
-
-[[repos.hooks]]
-id = "tombi-lint"
-name = "tombi lint"
-language = "system"
-entry = "tombi lint"
-files = "\\.toml$"
-pass_filenames = false
-
+# pytest: Rust 拡張のビルドを伴いコミットを遅くするため pre-push でだけ実行する
+# Rust の変更も Python 側の挙動を変えるため、どちらの変更でも実行する
 [[repos.hooks]]
 id = "pytest"
 name = "pytest"
-language = "system"
 entry = "uv run pytest"
-files = "^(python|src|tests)/|^conftest\\.py$"
+language = "system"
+types_or = ["python", "rust"]
 pass_filenames = false
 stages = ["pre-push"]
+priority = 30
+
+# cargo test: コミットを遅くしないため pre-push でだけ実行する
+[[repos.hooks]]
+id = "cargo-test"
+name = "cargo test"
+entry = "cargo test"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+stages = ["pre-push"]
+priority = 40

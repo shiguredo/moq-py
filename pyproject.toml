@@ -45,9 +45,6 @@ dev = [
   "hypothesis>=6.140,<7",
   # 実通信テスト用の自己署名証明書生成
   "cryptography>=50.0,<51",
-  # Python の format / lint / 型検査
-  "ruff",
-  "ty",
 ]
 
 [tool.maturin]
