@@ -1,7 +1,7 @@
 # README の FETCH fill の記述を実装に合わせる
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/update-readme-fetch-fill
 - Polished:
 
@@ -29,3 +29,11 @@ README の制限事項が実装と食い違っていると、利用者が使え�
 
 - README に「FETCH の fill は未対応」という記述が残っていないこと
 - README の他の記述と実装が矛盾していないこと
+
+## 解決方法
+
+`README.md` の「オブジェクトの送信」節の警告から「FETCH の fill は未対応です」の行を
+削除した。FILL_PARAMETERS は `moq.moq.Server.on_fill_fetch_stream` で対応済みであり、
+記述が実装と矛盾していた。
+
+README の他の記述 (低レベル API の例、対応仕様、制約) が実装と一致することを確認した。
