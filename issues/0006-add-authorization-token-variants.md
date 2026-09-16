@@ -1,7 +1,7 @@
 # AUTHORIZATION_TOKEN の 4 種を往復できるようにする
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-17
 - Branch: feature/add-authorization-token-variants
 - Polished:
 
@@ -38,3 +38,25 @@ DELETE / REGISTER / USE_ALIAS を送る手段が無い。
 - 受信した 4 種すべてから alias / token_type / token_value を正しく復元できること
 - 既存のタプル表現が引き続き動作すること
 - テストで往復を確認できること
+
+## 解決方法
+
+`src/core.rs` の `parameter_value_from_python` が AUTHORIZATION_TOKEN に
+`authorization_token_from_python` を使うようにした。SETUP 用に追加済みの変換関数を
+そのまま共用するため、`{"kind": ...}` の辞書で 4 種すべてを送れる。
+`(token_type, token_value)` のタプルは USE_VALUE として引き続き受け付ける。
+
+`parameter_value_to_python` は種別ごとに必要なキーだけを入れる辞書を返すようにした。
+`delete` と `use_alias` は `alias`、`register` は `alias` / `token_type` /
+`token_value`、`use_value` は `token_type` / `token_value` を持つ。`register` の
+`alias` を捨てる `let _ = alias;` を削除し、`use_alias` が alias を `token_type` と
+いう名前で返していた状態も解消した。
+
+`decode_parameter` と `MessageParameters` の doc を新しい表現に合わせ、
+`python/moqt/_native.pyi` を再生成した。
+
+テストは `tests/test_e2e.py` の `test_subscribe_carries_all_authorization_token_kinds`
+と、`tests/test_moqt.py` の `test_authorization_token_round_trips_all_kinds` /
+`test_decode_parameter_restores_an_authorization_token_alias` で確認する。e2e テストは
+publisher 側が MAX_AUTH_TOKEN_CACHE_SIZE を宣言しなければ REGISTER を受理できないため、
+その Setup Option を宣言した server を使う。
