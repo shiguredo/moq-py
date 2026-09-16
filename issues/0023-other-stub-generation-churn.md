@@ -1,7 +1,7 @@
 # 型スタブ生成時の空白差分を解消する
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-stub-generation-churn
 - Polished:
 
@@ -30,3 +30,11 @@
 - `uv run maturin develop --generate-stubs` の前後で `python/moqt/_native.pyi` に差分が出ないこと
 - `prek run --all-files` が通ること
 - 他のファイルに対する `trailing-whitespace` の検査が維持されていること
+
+## 解決方法
+
+`prek.toml` の `trailing-whitespace` フックに `python/moqt/_native.pyi` の除外を追加し、
+maturin が生成する型スタブを行末空白ごとそのままコミットするようにした。
+
+`uv run maturin develop --generate-stubs` の前後で `git status` が汚れないこと、
+他のファイルでは `trailing-whitespace` が引き続き動作することを確認した。
