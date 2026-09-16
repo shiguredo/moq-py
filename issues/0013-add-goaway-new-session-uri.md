@@ -1,7 +1,7 @@
 # GOAWAY で新しいセッション URI を指定できるようにする
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/add-goaway-new-session-uri
 - Polished:
 
@@ -31,3 +31,19 @@ moqt-rs の `MAX_NEW_SESSION_URI_LENGTH` を超える値は送出前に `MoqtErr
 - peer 側の `Client.peer_goaway` から URI を復元できること
 - 長さ上限を超える URI が拒否されること
 - e2e テストで確認できること
+
+## 解決方法
+
+`moqt.moq.Runtime.send_goaway` が `new_session_uri` を受け取れるようにし、空バイト列を
+固定で渡す実装をやめた。`moqt.moq.Client.goaway` と `moqt.moq.ServerSession.goaway` にも
+`new_session_uri` 引数 (既定値は空バイト列、`timeout` の次の位置) を追加した。
+
+- `MAX_NEW_SESSION_URI_LENGTH` を超える URI は状態機械へ渡す前に `MoqtError` にする。
+  上限ちょうどの URI は送信できる
+- URI を通知できるのは Server だけであり、Client が空でない URI を送ると状態機械が
+  `PROTOCOL_VIOLATION` で拒否する。この規則は `goaway` の doc に明記した
+  (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
+- 受信側は `PeerGoaway.new_session_uri` から URI を復元する
+
+テストは `tests/test_e2e.py` の `test_server_goaway_carries_a_new_session_uri` と
+`test_goaway_rejects_a_new_session_uri_beyond_the_length_limit` で確認する。
