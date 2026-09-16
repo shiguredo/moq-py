@@ -8,7 +8,7 @@ import logging
 
 import pytest
 from moqt import loc, moqt
-from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, Subscription
+from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, ServerSession, Subscription
 from moqt.moq._runtime import MoqtError, Runtime
 from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
@@ -948,3 +948,134 @@ async def test_fill_parameters_open_a_fill_fetch_stream(moq_pair: MoqPair) -> No
     await wait_until(lambda: bool(opened))
     assert opened[0][0] >= 0
     assert opened[0][1] >= 0
+
+
+async def test_publish_state_notify_is_delivered_to_the_subscriber(moq_pair: MoqPair) -> None:
+    """
+    PUBLISH_STATE_NOTIFY が購読側のコールバックへ届くことを確認する。
+
+    通知は publisher が自分の request で送り、subscriber が応答せずに受理する。
+    購読のクレジットも消費しない (draft-ietf-moq-transport-21 §9.10
+    (PUBLISH_STATE_NOTIFY))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    received: list[dict[int, object]] = []
+
+    async def on_publish_state_notify(parameters: dict[int, object]) -> None:
+        received.append(parameters)
+
+    moq_pair.client.on_publish_state_notify(on_publish_state_notify)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 状態として LARGEST_OBJECT を通知する
+    await published[0].send_publish_state_notify({moqt.PARAM_LARGEST_OBJECT: (2, 5)})
+
+    await wait_until(lambda: bool(received))
+    # パラメータは型付きで読める
+    assert moqt.MessageParameters(received[0]).largest_object == (2, 5)
+
+    # 通知は購読を終わらせない。続けて送ったオブジェクトが届く
+    await published[0].send_object(1, 0, b"after-notify")
+
+    objects = await _take_objects(subscription, 1)
+
+    assert objects[0].payload == b"after-notify"
+
+
+async def test_track_status_is_not_answered_by_an_endpoint(
+    moq_server: Server,
+    moq_client_factory: ClientFactory,
+) -> None:
+    """
+    endpoint が TRACK_STATUS に応答しないことを確認する。
+
+    draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS) は、publisher が失敗した
+    TRACK_STATUS に REQUEST_ERROR を返すとする。moqt-py が利用する状態機械は
+    TRACK_STATUS を endpoint が受信する request として受理しないため、応答は返らず、
+    要求を受け取った側のセッションはプロトコル違反で終了する。要求側には応答が
+    届かないため、制御メッセージの期限で失敗を検出する
+    (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+    """
+    sessions: list[ServerSession] = []
+    established = asyncio.Event()
+
+    async def on_session_established(session: ServerSession) -> None:
+        sessions.append(session)
+        established.set()
+
+    moq_server.on_session_established(on_session_established)
+    # 応答が返らないまま待ち続けないよう、制御メッセージの期限を設定する
+    client = await moq_client_factory(control_message_timeout=1.0)
+    await asyncio.wait_for(established.wait(), timeout=OBJECT_TIMEOUT)
+
+    with pytest.raises(MoqtError, match="session closed: code="):
+        await client.track_status(NAMESPACE, TRACK_NAME)
+
+    # 受理しなかった publisher 側もセッションを終了する
+    await wait_until(lambda: sessions[0].runtime.closed)
+
+
+async def test_client_goaway_is_notified_to_the_server(moq_pair: MoqPair) -> None:
+    """
+    client の GOAWAY が server へ届くことを確認する。
+
+    受信した GOAWAY は、その session と移行先の情報としてアプリへ通知される。
+    GOAWAY の受信後、状態機械はその peer への新規 request の送信を拒否する
+    (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+    """
+    received: list[tuple[ServerSession, PeerGoaway]] = []
+
+    async def on_goaway(session: ServerSession, info: PeerGoaway) -> None:
+        received.append((session, info))
+
+    moq_pair.server.on_goaway(on_goaway)
+
+    # client は移行先を通知できないため new session URI は空になる
+    await moq_pair.client.goaway(timeout=0)
+
+    await wait_until(lambda: bool(received))
+    assert received[0][0].session_id == moq_pair.session.session_id
+    assert received[0][1].new_session_uri == b""
+    assert received[0][1].timeout == 0
+
+
+async def test_datagram_priority_mismatch_cancels_the_subscription(moq_pair: MoqPair) -> None:
+    """
+    同じ Location の重複 Object の Priority が食い違うと購読が取り消されることを確認する。
+
+    draft-ietf-moq-transport-21 §12.1 (Malformed Tracks): "When a subscriber detects a
+    Malformed Track, it MUST cancel any corresponding subscription or fetches for that
+    Track from that publisher, and SHOULD deliver an error to the application."
+    セッションは閉じず、取り消された購読のオブジェクトが届かなくなる。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 同じ Group ID と Object ID のデータグラムを、違う Priority で 2 回送る
+    await published[0].send_datagram(1, 0, b"first", publisher_priority=10)
+    received = await _take_objects(subscription, 1)
+    assert received[0].payload == b"first"
+
+    await published[0].send_datagram(1, 0, b"second", publisher_priority=20)
+
+    # 重複 Object の不一致を検出した購読は取り消され、オブジェクトの到着が終わる
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(subscription.objects()), timeout=OBJECT_TIMEOUT)
+
+    # §12.1 が求めるのは購読の取り消しであり、セッションの終了ではない
+    assert moq_pair.client.established is True

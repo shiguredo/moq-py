@@ -516,7 +516,14 @@ class Client:
         track_name: bytes,
         parameters: dict[int, object] | None = None,
     ) -> TrackStatus:
-        """Track の状態を問い合わせる (TRACK_STATUS)。"""
+        """Track の状態を問い合わせる (TRACK_STATUS)。
+
+        draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS) は publisher が
+        TRACK_STATUS_OK または REQUEST_ERROR で応答するとする。moqt-py が利用する
+        状態機械は TRACK_STATUS を endpoint が受信する request として受理しないため、
+        moqt-py の server は応答を返さずにセッションを終了する。応答が無いまま
+        待ち続けないよう `control_message_timeout` を設定すること。
+        """
         runtime = self._require_runtime()
         request_id, event = await runtime.track_status(namespace, track_name, parameters)
         return TrackStatus(

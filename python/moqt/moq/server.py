@@ -19,6 +19,7 @@ from moqt.moq._runtime import (
     RuntimeEvents,
     TransportOps,
 )
+from moqt.moq.client import PeerGoaway
 from moqt.moq.publisher import Publication
 
 if TYPE_CHECKING:
@@ -284,6 +285,7 @@ class Server:
             Callable[[Runtime, int, dict[int, object]], Awaitable[None]] | None
         ) = None
         self._fill_fetch_callback: Callable[[Runtime, int, int], Awaitable[None]] | None = None
+        self._goaway_callback: Callable[[ServerSession, PeerGoaway], Awaitable[None]] | None = None
         self._tick_task: asyncio.Task[None] | None = None
 
         self._transport.on_session_ready(self._on_session_ready)
@@ -345,6 +347,19 @@ class Server:
         コールバックで `runtime.send_request_ok(request_id)` を呼ぶ。
         """
         self._request_update_callback = callback
+
+    def on_goaway(
+        self,
+        callback: Callable[[ServerSession, PeerGoaway], Awaitable[None]],
+    ) -> None:
+        """peer から GOAWAY が届いたときに呼び出す非同期 callback を設定する。
+
+        引数は GOAWAY を受信した session と、その内容である。GOAWAY の受信後は
+        状態機械がその peer への新規 request の送信を拒否する。移行先が通知された
+        場合は、アプリが新しいセッションへ接続し直す
+        (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+        """
+        self._goaway_callback = callback
 
     def on_fill_fetch_stream(
         self,
@@ -432,6 +447,7 @@ class Server:
             on_request=lambda event: self._on_request(context, event),
             on_request_update=lambda event: self._on_request_update(context, event),
             on_fill_fetch_stream=lambda request_id: self._on_fill_fetch_stream(context, request_id),
+            on_goaway=lambda event: self._on_goaway(context, event),
         )
 
     async def _on_fill_fetch_stream(self, context: ConnectionContext, request_id: int) -> None:
@@ -462,20 +478,44 @@ class Server:
             return
         await callback(connection.runtime, event.request_id or 0, event.parameters or {})
 
+    async def _on_goaway(self, context: ConnectionContext, event: NativeEvent) -> None:
+        """peer からの GOAWAY をアプリへ通知する。
+
+        通知先が未登録の場合も状態機械は GOAWAY を受信済みとして扱う。アプリが
+        関心を持つのは移行先と猶予時間だけである。
+        """
+        callback = self._goaway_callback
+        if callback is None:
+            return
+        connection = self._connection(context)
+        if connection is None:
+            return
+        body = event.message or {}
+        new_session_uri = body.get("new_session_uri")
+        timeout = body.get("timeout")
+        await callback(
+            self._server_session(connection),
+            PeerGoaway(
+                new_session_uri=new_session_uri if isinstance(new_session_uri, bytes) else b"",
+                timeout=timeout if isinstance(timeout, int) else 0,
+            ),
+        )
+
+    def _server_session(self, connection: _Connection) -> ServerSession:
+        """接続に対応する `ServerSession` を組み立てる。"""
+        return ServerSession(
+            session_id=connection.session_id,
+            address=connection.address,
+            runtime=connection.runtime,
+        )
+
     async def _on_established(self, context: ConnectionContext) -> None:
         """SETUP 完了をアプリケーションへ通知する。"""
-        address, session_id = context
         connection = self._connection(context)
         if connection is None:
             return
         if self._on_session_established is not None:
-            await self._on_session_established(
-                ServerSession(
-                    session_id=session_id,
-                    address=address,
-                    runtime=connection.runtime,
-                )
-            )
+            await self._on_session_established(self._server_session(connection))
 
     def _connection(self, context: ConnectionContext) -> _Connection | None:
         """コールバックの context から接続を引く。"""
@@ -592,11 +632,25 @@ class Server:
         data: bytes,
         address: tuple[str, int],
     ) -> None:
-        """受信データをストリーム種別に振り分ける。"""
+        """受信データをストリーム種別に振り分ける。
+
+        状態機械が拒否するデータを peer が送っても server は動き続ける。拒否の理由は
+        状態機械が保持し、session の終了は `Runtime.closed` で観測できる。
+        client 側の `_on_stream_data` と同じ扱いである。
+        """
         connection = self._connections.get((address, session_id))
         if connection is None:
             raise RuntimeError(f"unknown WebTransport session: {session_id} from {address}")
-        await connection.runtime.receive_stream(stream_id, data)
+        try:
+            await connection.runtime.receive_stream(stream_id, data)
+        except Exception as error:
+            logger.warning(
+                "MoQT stream from %s was rejected: session=%s stream=%s error=%s",
+                address,
+                session_id,
+                stream_id,
+                error,
+            )
 
     async def _on_stream_reset(
         self,
