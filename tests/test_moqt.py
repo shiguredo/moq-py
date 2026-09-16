@@ -2283,3 +2283,29 @@ def test_send_subgroup_header_rejects_a_subgroup_id_in_the_first_object_id_mode(
             False,
             False,
         )
+
+
+def test_send_object_datagram_evaluates_the_object_status() -> None:
+    """
+    状態機械が送信するデータグラムの Object Status を評価することを確認する。
+
+    状態機械は送信するオブジェクトの status を見て、Properties を持てるのは Normal
+    status だけとする (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+    Python 側は実際に送る status を渡さなければこの検査を受けられない。
+    """
+    # server が購読を受け、publisher としてデータグラムを送る経路を作る
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    properties = ObjectProperties()
+    properties.add(PROP_PRIOR_GROUP_ID_GAP, 2)
+    blob = properties.encode()
+
+    # 非 Normal status に Properties を付けると状態機械が拒否する
+    with pytest.raises(RuntimeError, match="properties on non-Normal status object"):
+        server.send_object_datagram(request_id, 1, 0, blob, moqt.OBJECT_STATUS_END_OF_GROUP)
+
+    # status を渡さなければ同じ Properties を付けたデータグラムを送れる
+    allowed, events = server.send_object_datagram(request_id, 1, 0, blob, None)
+    assert allowed is True
+    assert [event.kind for event in events] == []

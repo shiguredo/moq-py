@@ -381,6 +381,99 @@ async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> No
     assert decoded.object_delivery_timeout == 1000
 
 
+async def test_datagram_properties_reject_an_empty_block(moq_pair: MoqPair) -> None:
+    """
+    Properties Length = 0 のデータグラムを送信前に拒否することを確認する。
+
+    データグラムの Properties は `Properties Length | Key-Value-Pairs` の生バイト列で
+    あり、長さ 0 はプロトコル違反である
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    空の `ObjectProperties` をエンコードした結果がそのまま長さ 0 のブロックになる。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 空のプロパティ集合は Properties Length = 0 の 1 バイトになる
+    empty = moqt.ObjectProperties().encode()
+    assert empty == b"\x00"
+
+    with pytest.raises(MoqtError, match="datagram properties length 0"):
+        await published[0].send_datagram(1, 0, b"payload", properties_data=empty)
+
+
+async def test_properties_reject_a_length_mismatch(moq_pair: MoqPair) -> None:
+    """
+    Properties Length と実データ長が食い違うブロックを拒否することを確認する。
+
+    Properties は `Properties Length | Key-Value-Pairs` であり、宣言長は後続の
+    バイト数と一致しなければならない
+    (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+    長さを書き直して送ると、呼び出し側が渡したバイト列と wire が食い違う。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 宣言長 5 に対して実データが 2 バイトしかないブロック
+    broken = b"\x05\x01\x02"
+
+    with pytest.raises(MoqtError, match="does not match the actual data length"):
+        await published[0].send_datagram(1, 0, b"datagram", properties_data=broken)
+
+    # subgroup も同じ正規化を使うため、同じブロックを拒否する
+    with pytest.raises(MoqtError, match="does not match the actual data length"):
+        await published[0].send_object(1, 0, b"object", properties_data=broken)
+
+
+async def test_datagram_properties_reject_a_non_normal_status(moq_pair: MoqPair) -> None:
+    """
+    非 Normal の Object Status に Properties を付けたデータグラムを拒否することを確認する。
+
+    Properties を持てるのは Normal status のオブジェクトだけである
+    (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+    拒否したデータグラムは送られないため、購読側には何も届かない。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    properties = moqt.ObjectProperties()
+    properties.add(moqt.PROP_PRIOR_GROUP_ID_GAP, 2)
+
+    with pytest.raises(MoqtError, match="properties on non-Normal status object"):
+        await published[0].send_datagram(
+            1,
+            0,
+            b"",
+            properties_data=properties.encode(),
+            status=moqt.OBJECT_STATUS_END_OF_GROUP,
+        )
+
+    # 拒否したあとも同じセッションで送信できる
+    await published[0].send_datagram(1, 1, b"after-rejection")
+    received = await _take_objects(subscription, 1)
+    assert received[0].payload == b"after-rejection"
+
+
 async def test_datagram_publisher_priority_is_delivered(moq_pair: MoqPair) -> None:
     """
     データグラムが運ぶ Publisher Priority が受信側で参照できることを確認する。

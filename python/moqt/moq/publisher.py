@@ -84,8 +84,9 @@ class Publication:
         (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
 
         `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
-        Properties の有無は subgroup ヘッダで固定されるため、同じ subgroup の
-        最初のオブジェクトで決める
+        `Properties Length` を含む生バイト列であり、宣言長と実データ長が一致しない場合は
+        `MoqtError` になる。Properties の有無は subgroup ヘッダで固定されるため、
+        同じ subgroup の最初のオブジェクトで決める
         (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
         """
         await self.runtime.send_subgroup_object(
@@ -120,6 +121,12 @@ class Publication:
         (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
 
         `status` の扱いは `send_object` と同じである。
+
+        `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
+        `Properties Length` を含む生バイト列であり、宣言長と実データ長が一致しない場合は
+        `MoqtError` になる。データグラムは Properties Length = 0 を持てず、非 Normal の
+        `status` に Properties を付けることもできない
+        (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram) / §11.1.3 (Object Properties))。
 
         データグラムの合計サイズが `moqt.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
         記録する。上限は経路 MTU に依存し、超えたデータグラムは通知なく破棄される

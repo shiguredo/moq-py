@@ -1155,6 +1155,10 @@ class Runtime:
         track_alias = self._core.subscription_track_alias(request_id)
         if track_alias is None:
             raise MoqtError(f"subscription {request_id} has no track alias")
+        # 状態機械がフィルタ評価に使うバイト列と wire へ書くバイト列を同一にする。
+        # 宣言長と実データ長が一致しない Properties はここで拒否する
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        properties_bytes = None if properties_data is None else _properties_blob(properties_data)
         # 状態機械へ通知する前にバイト列を組み立て、不正な組み合わせでは送信しない
         datagram = _encode_object_datagram(
             track_alias,
@@ -1162,7 +1166,7 @@ class Runtime:
             object_id,
             payload,
             publisher_priority,
-            properties_data=properties_data,
+            properties_bytes=properties_bytes,
             status=status,
         )
         if len(datagram) > moqt.MAX_DATAGRAM_SIZE:
@@ -1177,7 +1181,7 @@ class Runtime:
                 moqt.MAX_DATAGRAM_SIZE,
             )
         allowed, events = self._core.send_object_datagram(
-            request_id, group_id, object_id, properties_data, None
+            request_id, group_id, object_id, properties_bytes, status
         )
         await self._apply_events(events)
         if not allowed:
@@ -1737,20 +1741,29 @@ def _properties_content(properties_data: bytes) -> bytes:
     (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。`ObjectProperties.encode`
     が返す値はこの全体であるため、オブジェクトへ書き込むときは長さ部分を分離する。
 
-    長さが後続のバイト数と一致する場合は長さ付きとして扱い、一致しない場合は
-    長さなしの内容として扱う。LOC のプロパティのように長さを含まないブロックを
-    渡した場合にも対応する。
+    宣言長が後続バイト数と一致しないブロックは解釈できない。長さを付け直すと呼び出し側が
+    渡したバイト列と wire が食い違うため、黙って作り直さずに拒否する。
+    この節番号・規則は draft 由来であり将来の改訂で変更されうる。
     """
-    length, consumed = moqt.decode_varint(properties_data)
-    if length == len(properties_data) - consumed:
-        return properties_data[consumed:]
-    return properties_data
+    try:
+        length, consumed = moqt.decode_varint(properties_data)
+    except ValueError as error:
+        # 空のブロックや途中で切れた Properties Length もここで拒否する
+        raise MoqtError(f"properties length is malformed: {error}") from error
+    actual = len(properties_data) - consumed
+    if length != actual:
+        raise MoqtError(
+            f"properties length {length} does not match the actual data length {actual}"
+        )
+    return properties_data[consumed:]
 
 
 def _properties_blob(properties_data: bytes) -> bytes:
     """Properties ブロックを `Properties Length | Key-Value-Pairs` の形へ整える。
 
-    状態機械へ渡すバイト列と wire へ書くバイト列を同じにするために使う
+    状態機械へ渡すバイト列と wire へ書くバイト列を同じにするために使う。
+    渡す値は `Properties Length` を含む生バイト列でなければならず、宣言長と
+    実データ長が一致しない場合は `MoqtError` になる
     (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
     """
     content = _properties_content(properties_data)
@@ -1794,7 +1807,7 @@ def _encode_object_datagram(
     payload: bytes,
     publisher_priority: int | None,
     *,
-    properties_data: bytes | None = None,
+    properties_bytes: bytes | None = None,
     end_of_group: bool = False,
     status: int | None = None,
 ) -> bytes:
@@ -1803,10 +1816,32 @@ def _encode_object_datagram(
     フィールドの並びは Type Flags、Track Alias、Group ID、Object ID である。
     bit 4 は未定義であり、設定してはならない。Object ID が 0 の場合は
     ZERO_OBJECT_ID bit を立てて Object ID フィールドを省略する。
+
+    `properties_bytes` は `Properties Length | Key-Value-Pairs` の形である。
+    省略した場合は Properties を書かない。
+
+    draft の MUST に反する組み合わせは wire を組み立てる前に `MoqtError` で拒否する。
+    この節番号・規則は draft 由来であり将来の改訂で変更されうる。
     """
     written = _object_status_to_write(status, payload)
+    # STATUS と END_OF_GROUP を同時に指定すると無効な Type 値になる
+    # (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    if written is not None and end_of_group:
+        raise MoqtError("STATUS and END_OF_GROUP cannot both be set")
+    if properties_bytes is not None:
+        length, _ = moqt.decode_varint(properties_bytes)
+        # データグラムは Properties Length = 0 を持てない。Properties を付けるなら
+        # 1 バイト以上の内容が要る (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+        if length == 0:
+            raise MoqtError(
+                "datagram properties length 0 is invalid when the PROPERTIES bit is set"
+            )
+        # 非 Normal status のオブジェクトは Properties を持てない
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        if written is not None and written != moqt.OBJECT_STATUS_NORMAL:
+            raise MoqtError("properties on non-Normal status object is not allowed")
     type_byte = 0x00
-    if properties_data is not None:
+    if properties_bytes is not None:
         type_byte |= 0x01
     if end_of_group:
         type_byte |= 0x02
@@ -1828,12 +1863,10 @@ def _encode_object_datagram(
         datagram += moqt.encode_varint(object_id)
     if publisher_priority is not None:
         datagram.append(publisher_priority)
-    if properties_data is not None:
+    if properties_bytes is not None:
         # データグラムは `Properties Length | Key-Value-Pairs` を書く
         # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
-        content = _properties_content(properties_data)
-        datagram += moqt.encode_varint(len(content))
-        datagram += content
+        datagram += properties_bytes
     if written is None:
         datagram += payload
     else:
