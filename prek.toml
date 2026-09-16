@@ -16,7 +16,9 @@ exclude = { glob = ["target/**", ".venv/**", "dist/**"] }
 repo = "builtin"
 hooks = [
   # 行末の空白を取り除く
-  { id = "trailing-whitespace" },
+  # python/moqt/_native.pyi は maturin が生成する型スタブであり、生成時の内容を
+  # そのままコミットする。フックで書き換えると生成のたびに差分が出るため除外する
+  { id = "trailing-whitespace", exclude = { glob = ["python/moqt/_native.pyi"] } },
   # ファイル末尾を改行 1 つで終わらせる
   { id = "end-of-file-fixer" },
   # ファイル先頭の UTF-8 BOM を取り除く
