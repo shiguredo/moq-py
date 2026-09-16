@@ -200,7 +200,15 @@ pub(crate) fn decode_varint_prefix(data: &[u8]) -> PyResult<Option<(u64, usize)>
 /// `(group_id, object_id)`、`AUTHORIZATION_TOKEN` は辞書、
 /// `FILL_PARAMETERS` は入れ子の辞書になる。
 ///
-/// 解釈できないバイト列は `ValueError` になる。
+/// `AUTHORIZATION_TOKEN` の辞書は `kind` で種別を表し、キーは種別ごとに異なる
+/// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+///
+/// - `delete` / `use_alias`: `alias`
+/// - `register`: `alias` / `token_type` / `token_value`
+/// - `use_value`: `token_type` / `token_value`
+///
+/// 解釈できないバイト列は `ValueError` になる。この節番号・規則は draft 由来であり
+/// 将来の改訂で変更されうる。
 /// (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
 #[pyfunction]
 pub(crate) fn decode_parameter(

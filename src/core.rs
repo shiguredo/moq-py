@@ -207,16 +207,12 @@ pub(crate) fn parameter_value_from_python(
             let (group, object) = value.extract::<(u64, u64)>()?;
             Ok(MessageParameterValue::Location { group, object })
         }
-        // AUTHORIZATION_TOKEN (draft-ietf-moq-transport-21 §8.9)
-        PARAM_AUTHORIZATION_TOKEN => {
-            let (token_type, token_value) = value.extract::<(u64, Vec<u8>)>()?;
-            Ok(MessageParameterValue::AuthorizationToken(
-                AuthorizationToken::UseValue {
-                    token_type,
-                    token_value,
-                },
-            ))
-        }
+        // AUTHORIZATION_TOKEN は 4 種の Token 構造を取る
+        // (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+        // SETUP と同じ表現で受け取る
+        PARAM_AUTHORIZATION_TOKEN => Ok(MessageParameterValue::AuthorizationToken(
+            authorization_token_from_python(value)?,
+        )),
         // FILL_PARAMETERS の内側パラメータ群 (draft-ietf-moq-transport-21 §9.20.16)
         PARAM_FILL_PARAMETERS => Ok(MessageParameterValue::FillParameters(
             message_parameters_from_python(value)?,
@@ -390,10 +386,13 @@ pub(crate) fn decode_parameter_to_python(
     parameter_value_to_python(py, &parameter.value)
 }
 
-/// パラメータの値を Python 側の値へ変換する。
+/// パラメータ値の表現を Python 側の値へ変換する。
 ///
 /// `MessageParameterValue` をそのまま解釈した結果を返す。アプリは
 /// `Event.parameters` の生バイトをこの関数で解釈する。
+///
+/// AUTHORIZATION_TOKEN は `kind` で種別を表す辞書になり、キーは種別ごとに異なる
+/// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
 pub(crate) fn parameter_value_to_python(
     py: Python<'_>,
     value: &MessageParameterValue,
@@ -412,30 +411,36 @@ pub(crate) fn parameter_value_to_python(
         }
         MessageParameterValue::AuthorizationToken(token) => {
             let dict = PyDict::new(py);
-            let (kind, token_type, token_value) = match token {
-                AuthorizationToken::UseValue {
-                    token_type,
-                    token_value,
-                } => ("use_value", Some(*token_type), Some(token_value.as_slice())),
-                AuthorizationToken::UseAlias { alias } => ("use_alias", Some(*alias), None),
+            // 種別ごとに必要なキーだけを入れる。`alias` は DELETE / REGISTER / USE_ALIAS、
+            // `token_type` と `token_value` は REGISTER / USE_VALUE が持つ
+            // (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+            match token {
+                AuthorizationToken::Delete { alias } => {
+                    dict.set_item("kind", "delete")?;
+                    dict.set_item("alias", *alias)?;
+                }
                 AuthorizationToken::Register {
                     alias,
                     token_type,
                     token_value,
                 } => {
-                    let _ = alias;
-                    ("register", Some(*token_type), Some(token_value.as_slice()))
+                    dict.set_item("kind", "register")?;
+                    dict.set_item("alias", *alias)?;
+                    dict.set_item("token_type", *token_type)?;
+                    dict.set_item("token_value", PyBytes::new(py, token_value))?;
                 }
-                AuthorizationToken::Delete { alias } => ("delete", Some(*alias), None),
-            };
-            dict.set_item("kind", kind)?;
-            match token_type {
-                Some(value) => dict.set_item("token_type", value)?,
-                None => dict.set_item("token_type", py.None())?,
-            }
-            match token_value {
-                Some(value) => dict.set_item("token_value", PyBytes::new(py, value))?,
-                None => dict.set_item("token_value", py.None())?,
+                AuthorizationToken::UseAlias { alias } => {
+                    dict.set_item("kind", "use_alias")?;
+                    dict.set_item("alias", *alias)?;
+                }
+                AuthorizationToken::UseValue {
+                    token_type,
+                    token_value,
+                } => {
+                    dict.set_item("kind", "use_value")?;
+                    dict.set_item("token_type", *token_type)?;
+                    dict.set_item("token_value", PyBytes::new(py, token_value))?;
+                }
             }
             Ok(dict.into_any().unbind())
         }
@@ -787,6 +792,14 @@ fn setup_option_value_from_python(
 /// `kind` で種別を指定する辞書と、`(token_type, token_value)` のタプルを受け付ける。
 /// 種別は draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の
 /// DELETE / REGISTER / USE_ALIAS / USE_VALUE である。
+///
+/// 辞書が取るキーは種別ごとに異なる。
+///
+/// - `delete` / `use_alias`: `alias`
+/// - `register`: `alias` / `token_type` / `token_value`
+/// - `use_value`: `token_type` / `token_value`
+///
+/// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
 fn authorization_token_from_python(value: &Bound<'_, PyAny>) -> PyResult<AuthorizationToken> {
     let Ok(dict) = value.cast::<PyDict>() else {
         // Alias を使わない USE_VALUE はタプルでも指定できる

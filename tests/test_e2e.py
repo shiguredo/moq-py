@@ -183,6 +183,77 @@ async def test_object_property_filter_selects_objects_by_property(
             await run_task
 
 
+async def test_subscribe_carries_all_authorization_token_kinds(
+    moq_certificates: tuple[str, str],
+) -> None:
+    """
+    AUTHORIZATION_TOKEN の 4 種が購読パラメータとして往復することを確認する。
+
+    種別は draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の
+    DELETE / REGISTER / USE_ALIAS / USE_VALUE である。REGISTER で登録した alias を
+    同じメッセージの USE_ALIAS が参照できるよう、登録を先に並べる。既存の
+    `(token_type, token_value)` タプルも USE_VALUE として受け付け続ける。
+    """
+    certfile, keyfile = moq_certificates
+    # REGISTER を受ける側は MAX_AUTH_TOKEN_CACHE_SIZE を宣言しなければ REGISTER を
+    # 受理できない。上限は Token 1 件あたり 16 バイト + Token Value のバイト数で
+    # 数える (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=certfile,
+        keyfile=keyfile,
+        setup_options={moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE: 4096},
+    )
+    await server.start()
+    run_task = asyncio.create_task(server.run())
+    client: Client | None = None
+    try:
+        requests: list[SubscriptionRequest] = []
+
+        async def on_subscribe(request: SubscriptionRequest) -> None:
+            requests.append(request)
+            # 同じ Track Alias を別の Track へ再利用できないため、購読ごとに変える
+            await request.subscribe_ok(len(requests))
+
+        server.on_subscribe(on_subscribe)
+        client = Client(
+            url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+            verify_peer=False,
+        )
+        await client.connect()
+
+        tokens: list[dict[str, object]] = [
+            {"kind": "delete", "alias": 9},
+            {"kind": "register", "alias": 3, "token_type": 1, "token_value": b"registered"},
+            {"kind": "use_alias", "alias": 3},
+            {"kind": "use_value", "token_type": 2, "token_value": b"value"},
+        ]
+        await client.subscribe(NAMESPACE, TRACK_NAME, {moqt.PARAM_AUTHORIZATION_TOKEN: tokens})
+        await wait_until(lambda: bool(requests))
+
+        # 受信側でも 4 種すべてが alias / token_type / token_value まで復元される
+        received = moqt.MessageParameters(requests[0].parameters).authorization_tokens()
+        assert received == tokens
+
+        # タプル表現は USE_VALUE として扱われる
+        await client.subscribe(
+            NAMESPACE, b"audio", {moqt.PARAM_AUTHORIZATION_TOKEN: (4, b"legacy")}
+        )
+        await wait_until(lambda: len(requests) == 2)
+
+        assert moqt.MessageParameters(requests[1].parameters).authorization_tokens() == [
+            {"kind": "use_value", "token_type": 4, "token_value": b"legacy"}
+        ]
+    finally:
+        if client is not None:
+            await client.close()
+        await server.stop()
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+
+
 async def test_two_clients_connect_to_one_server(moq_client_factory: ClientFactory) -> None:
     """
     同じ server へ 2 本の client を接続できることを確認する。

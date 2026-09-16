@@ -431,11 +431,19 @@ impl MessageParameters {
     /// `bytes` 以外の値は型ごとの Python 表現としても受け取る。`uint8` と `vi64` の
     /// パラメータは `int`、`LARGEST_OBJECT` は `(group_id, object_id)`、
     /// `TRACK_NAMESPACE_PREFIX` は `bytes` のリスト、`FILL_PARAMETERS` は入れ子の辞書、
-    /// `AUTHORIZATION_TOKEN` は `(token_type, token_value)` である。`LOCATION_FILTER`
+    /// `AUTHORIZATION_TOKEN` は `{"kind": ...}` の辞書または
+    /// `(token_type, token_value)` のタプルである。`LOCATION_FILTER`
     /// には [`LocationFilter`] も渡せる。
+    ///
+    /// `AUTHORIZATION_TOKEN` の辞書は `kind` で `delete` / `register` / `use_alias` /
+    /// `use_value` を選び、キーは種別ごとに異なる。`delete` と `use_alias` は `alias`、
+    /// `register` は `alias` / `token_type` / `token_value`、`use_value` は
+    /// `token_type` / `token_value` を取る
+    /// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
     ///
     /// 長さ付きバイト列のパラメータは、長さプレフィックスを含むエンコード済みの値を
     /// 要求する。長さが合わない値と解釈できない値は `ValueError` になる。
+    /// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
     #[new]
     #[pyo3(signature = (parameters = None))]
     fn new(parameters: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -607,7 +615,8 @@ impl MessageParameters {
     /// AUTHORIZATION_TOKEN (type 0x03) の値を出現順に返す
     /// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
     ///
-    /// 各要素は `decode_parameter` が返すものと同じ辞書である。AUTHORIZATION_TOKEN は
+    /// 各要素は `decode_parameter` が返すものと同じ「`kind` で種別を表す辞書」であり、
+    /// 4 種すべてで alias / token_type / token_value が復元される。AUTHORIZATION_TOKEN は
     /// 同一メッセージ内で複数回出現できる。
     fn authorization_tokens(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let mut tokens = Vec::new();

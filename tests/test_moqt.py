@@ -1126,6 +1126,63 @@ def test_message_parameters_accepts_typed_values() -> None:
     assert MessageParameters(parameters.to_dict()) == parameters
 
 
+def test_authorization_token_round_trips_all_kinds() -> None:
+    """
+    AUTHORIZATION_TOKEN の 4 種すべてを辞書として往復できることを確認する。
+
+    種別は draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の
+    DELETE / REGISTER / USE_ALIAS / USE_VALUE である。辞書のキーは種別ごとに異なり、
+    DELETE と USE_ALIAS は `alias`、REGISTER は `alias` / `token_type` / `token_value`、
+    USE_VALUE は `token_type` / `token_value` を持つ。
+    """
+    tokens = [
+        {"kind": "delete", "alias": 9},
+        {"kind": "register", "alias": 3, "token_type": 1, "token_value": b"registered"},
+        {"kind": "use_alias", "alias": 3},
+        {"kind": "use_value", "token_type": 2, "token_value": b"value"},
+    ]
+    parameters = MessageParameters({moqt.PARAM_AUTHORIZATION_TOKEN: tokens})
+
+    # 送った 4 種が同じ辞書として復元される
+    assert parameters.authorization_tokens() == tokens
+
+    # エンコード済みの辞書へ戻して構築し直しても 4 種すべてが保たれる
+    round_tripped = MessageParameters(parameters.to_dict())
+
+    assert round_tripped == parameters
+    assert round_tripped.authorization_tokens() == tokens
+
+
+def test_decode_parameter_restores_an_authorization_token_alias() -> None:
+    """
+    受信した AUTHORIZATION_TOKEN から alias を復元できることを確認する。
+
+    REGISTER の Token 構造は `Token Alias Type | Token Alias | Token Type | Token Value`
+    であり、パラメータの値は長さ付きバイト列である
+    (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+    辞書から alias を落とすと peer が登録内容を追跡できなくなる。
+    """
+    # Token Alias Type = 0x01 (REGISTER)、Token Alias = 7、Token Type = 1
+    token = encode_varint(0x01) + encode_varint(7) + encode_varint(1) + b"registered"
+    raw = encode_varint(len(token)) + token
+
+    assert moqt.decode_parameter(moqt.PARAM_AUTHORIZATION_TOKEN, raw) == {
+        "kind": "register",
+        "alias": 7,
+        "token_type": 1,
+        "token_value": b"registered",
+    }
+
+    # USE_ALIAS は alias だけを持ち、token_type / token_value を持たない
+    alias = encode_varint(0x02) + encode_varint(7)
+    raw = encode_varint(len(alias)) + alias
+
+    assert moqt.decode_parameter(moqt.PARAM_AUTHORIZATION_TOKEN, raw) == {
+        "kind": "use_alias",
+        "alias": 7,
+    }
+
+
 def test_message_parameters_rejects_raw_filter_bytes() -> None:
     """
     長さプレフィックスを持たないフィルタのバイト列を拒否することを確認する。

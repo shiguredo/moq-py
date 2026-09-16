@@ -1290,11 +1290,19 @@ class MessageParameters:
         `bytes` 以外の値は型ごとの Python 表現としても受け取る。`uint8` と `vi64` の
         パラメータは `int`、`LARGEST_OBJECT` は `(group_id, object_id)`、
         `TRACK_NAMESPACE_PREFIX` は `bytes` のリスト、`FILL_PARAMETERS` は入れ子の辞書、
-        `AUTHORIZATION_TOKEN` は `(token_type, token_value)` である。`LOCATION_FILTER`
+        `AUTHORIZATION_TOKEN` は `{"kind": ...}` の辞書または
+        `(token_type, token_value)` のタプルである。`LOCATION_FILTER`
         には [`LocationFilter`] も渡せる。
+        
+        `AUTHORIZATION_TOKEN` の辞書は `kind` で `delete` / `register` / `use_alias` /
+        `use_value` を選び、キーは種別ごとに異なる。`delete` と `use_alias` は `alias`、
+        `register` は `alias` / `token_type` / `token_value`、`use_value` は
+        `token_type` / `token_value` を取る
+        (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
         
         長さ付きバイト列のパラメータは、長さプレフィックスを含むエンコード済みの値を
         要求する。長さが合わない値と解釈できない値は `ValueError` になる。
+        この節番号・規則は draft 由来であり将来の改訂で変更されうる。
         """
     def __repr__(self, /) -> str: ...
     def authorization_tokens(self, /) -> list[Any]:
@@ -1302,7 +1310,8 @@ class MessageParameters:
         AUTHORIZATION_TOKEN (type 0x03) の値を出現順に返す
         (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
         
-        各要素は `decode_parameter` が返すものと同じ辞書である。AUTHORIZATION_TOKEN は
+        各要素は `decode_parameter` が返すものと同じ「`kind` で種別を表す辞書」であり、
+        4 種すべてで alias / token_type / token_value が復元される。AUTHORIZATION_TOKEN は
         同一メッセージ内で複数回出現できる。
         """
     @property
@@ -2796,7 +2805,15 @@ def decode_parameter(param_type: int, value: bytes) -> Any:
     `(group_id, object_id)`、`AUTHORIZATION_TOKEN` は辞書、
     `FILL_PARAMETERS` は入れ子の辞書になる。
     
-    解釈できないバイト列は `ValueError` になる。
+    `AUTHORIZATION_TOKEN` の辞書は `kind` で種別を表し、キーは種別ごとに異なる
+    (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+    
+    - `delete` / `use_alias`: `alias`
+    - `register`: `alias` / `token_type` / `token_value`
+    - `use_value`: `token_type` / `token_value`
+    
+    解釈できないバイト列は `ValueError` になる。この節番号・規則は draft 由来であり
+    将来の改訂で変更されうる。
     (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
     """
 
