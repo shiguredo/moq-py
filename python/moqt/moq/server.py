@@ -249,6 +249,7 @@ class Server:
         implementation: str = "moqt-py",
         control_message_timeout: float | None = None,
         data_stream_timeout: float | None = None,
+        setup_options: dict[int, object] | None = None,
     ) -> None:
         """server を作成する。
 
@@ -256,6 +257,12 @@ class Server:
         期限 (秒) である。省略した場合は期限を設けない。設定すると期限切れで
         セッションが終了する
         (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+
+        `setup_options` は SETUP で送る Setup Option である。キーは Setup Option Type、
+        値は偶数型なら `int`、奇数型なら `bytes`、AUTHORIZATION_TOKEN なら Token の
+        辞書またはそのリストである。MOQT_IMPLEMENTATION は `implementation` 引数が
+        担うため指定できない
+        (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
         """
         self._transport = h3.Server(
             host=host,
@@ -267,6 +274,7 @@ class Server:
         self._implementation = implementation
         self._control_message_timeout = control_message_timeout
         self._data_stream_timeout = data_stream_timeout
+        self._setup_options = dict(setup_options) if setup_options is not None else None
         self._connections: dict[tuple[tuple[str, int], int], _Connection] = {}
         self._on_session_established: Callable[[ServerSession], Awaitable[None]] | None = None
         self._on_subscribe: Callable[[SubscriptionRequest], Awaitable[None]] | None = None
@@ -566,6 +574,7 @@ class Server:
             events=self._runtime_events(context),
             control_message_timeout=self._control_message_timeout,
             data_stream_timeout=self._data_stream_timeout,
+            setup_options=self._setup_options,
         )
         self._connections[key] = _Connection(
             runtime=runtime, address=address, session_id=session_id

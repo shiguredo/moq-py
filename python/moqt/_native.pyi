@@ -576,9 +576,14 @@ class Session:
     relay 全体の routing / fan-out / cache / policy は扱わない。
     """
     @staticmethod
-    def client(implementation: str = "moqt-py") -> Session:
+    def client(implementation: str = "moqt-py", setup_options: dict |None = None) -> Session:
         """
         client role の MoQT Session を作成する。
+        
+        `setup_options` は Setup Option Type をキーにした辞書である。偶数型は `int`、
+        奇数型は `bytes`、AUTHORIZATION_TOKEN は Token の辞書またはそのリストを渡す。
+        MOQT_IMPLEMENTATION は `implementation` 引数が担うため指定できない
+        (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
         """
     def close(self, /, code: int, reason: str = "internal error") -> list[Event]:
         """
@@ -618,6 +623,15 @@ class Session:
     def next_local_request_id(self, /) -> int:
         """
         次の request 用 Request ID を予約する。
+        """
+    def peer_setup_options(self, /) -> dict:
+        """
+        peer が SETUP で宣言した Setup Option を返す。
+        
+        キーは Setup Option Type、値は偶数型なら `int`、奇数型なら `bytes` である。
+        AUTHORIZATION_TOKEN は Token の辞書のリストになる。SETUP を受信していない
+        場合は空の辞書を返す。
+        (draft-ietf-moq-transport-21 §9.1 (SETUP) / §16.4 (Setup Options))
         """
     def receive_control(self, /, data: bytes) -> list[Event]:
         """
@@ -811,9 +825,11 @@ class Session:
         TRACK_STATUS を送信する。
         """
     @staticmethod
-    def server(implementation: str = "moqt-py") -> Session:
+    def server(implementation: str = "moqt-py", setup_options: dict |None = None) -> Session:
         """
         server role の MoQT Session を作成する。
+        
+        引数の意味は `client` と同じである。
         """
     def set_control_message_timeout_ms(self, /, timeout_ms: int |None) -> None:
         """

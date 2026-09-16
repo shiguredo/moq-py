@@ -216,6 +216,84 @@ def test_client_rejects_an_implementation_option_over_the_wire_limit() -> None:
         Session.client("a" * IMPLEMENTATION_WIRE_LIMIT)
 
 
+def test_setup_options_are_sent_and_observed() -> None:
+    """
+    SETUP で送った Setup Option が peer から参照できることを確認する。
+
+    偶数型は varint、奇数型は長さ付きバイト列で表現する
+    (draft-ietf-moq-transport-21 §9.1 (SETUP) / §16.4 (Setup Options))。
+    MOQT_IMPLEMENTATION は `implementation` 引数が担う。
+    """
+    client = Session.client(
+        "c",
+        {
+            moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE: 16,
+            moqt.SETUP_OPTION_AUTHORIZATION_TOKEN: {
+                "kind": "use_value",
+                "token_type": 1,
+                "token_value": b"secret",
+            },
+        },
+    )
+    server = Session.server("s", {moqt.SETUP_OPTION_MAX_FILTER_RANGES: 8})
+
+    # SETUP を受信する前は peer の Setup Option が分からない
+    assert client.peer_setup_options() == {}
+
+    client_setup = client.start()
+    server_setup = server.start()
+    server.receive_control(client_setup)
+    client.receive_control(server_setup)
+
+    assert client.peer_setup_options()[moqt.SETUP_OPTION_MOQT_IMPLEMENTATION] == b"s"
+    assert client.peer_setup_options()[moqt.SETUP_OPTION_MAX_FILTER_RANGES] == 8
+    assert server.peer_setup_options()[moqt.SETUP_OPTION_MOQT_IMPLEMENTATION] == b"c"
+    assert server.peer_setup_options()[moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE] == 16
+    # AUTHORIZATION_TOKEN は Token 構造の辞書であり、複数指定できるためリストになる
+    assert server.peer_setup_options()[moqt.SETUP_OPTION_AUTHORIZATION_TOKEN] == [
+        {"kind": "use_value", "token_type": 1, "token_value": b"secret"}
+    ]
+
+
+def test_setup_option_rejects_moqt_implementation() -> None:
+    """
+    MOQT_IMPLEMENTATION を setup_options で二重に指定できないことを確認する。
+
+    MOQT_IMPLEMENTATION は `implementation` 引数が担う
+    (draft-ietf-moq-transport-21 §9.1.5 (MOQT_IMPLEMENTATION))。
+    """
+    with pytest.raises(ValueError, match="MOQT_IMPLEMENTATION is specified"):
+        Session.client("c", {moqt.SETUP_OPTION_MOQT_IMPLEMENTATION: b"other"})
+
+
+def test_range_filter_requires_the_peer_to_declare_max_filter_ranges() -> None:
+    """
+    peer が MAX_FILTER_RANGES を宣言している場合だけ Range Filter を送れることを確認する。
+
+    draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES): Range Filter は
+    自側 SETUP の MAX_FILTER_RANGES が 0 でない場合だけ許される。
+    """
+    # SetID=0 で Object ID 0..=1 を指定する Range Filter
+    # (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))
+    object_id_filter = bytes([0]) + encode_varint(0) + encode_varint(1)
+
+    # 宣言が無ければ送信できない
+    client, _server = _setup()
+    with pytest.raises(RuntimeError, match="MAX_FILTER_RANGES"):
+        client.send_subscribe([b"ns"], b"t", {moqt.PARAM_OBJECTID_FILTER: object_id_filter})
+
+    # 宣言があれば送信できる
+    client = Session.client("c")
+    server = Session.server("s", {moqt.SETUP_OPTION_MAX_FILTER_RANGES: 8})
+    client_setup = client.start()
+    server_setup = server.start()
+    server.receive_control(client_setup)
+    client.receive_control(server_setup)
+
+    events = client.send_subscribe([b"ns"], b"t", {moqt.PARAM_OBJECTID_FILTER: object_id_filter})
+    assert [event.kind for event in events] == ["send_request"]
+
+
 # ─── varint ─────────────────────────────────────────────────
 
 

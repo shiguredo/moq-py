@@ -38,7 +38,8 @@ use shiguredo_moqt::message_parameter::{
     PARAM_TRACK_PROPERTY_FILTER,
 };
 use shiguredo_moqt::parameter::{
-    SETUP_OPTION_MOQT_IMPLEMENTATION, SetupOption, SetupOptionValue, SetupOptions,
+    SETUP_OPTION_AUTHORIZATION_TOKEN, SETUP_OPTION_MOQT_IMPLEMENTATION, SetupOption,
+    SetupOptionValue, SetupOptions,
 };
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{
@@ -528,41 +529,158 @@ fn request_error_to_python(
     Ok(())
 }
 
-/// Setup Options から MOQT_IMPLEMENTATION の値を取り出す。
+/// Setup Options を Python 側の辞書へ変換する。
+///
+/// キーは Setup Option Type、値は偶数型なら `int`、奇数型なら `bytes` である。
+/// AUTHORIZATION_TOKEN (0x03) は Token 構造を持つため辞書になり、SETUP では
+/// 複数指定できるためリストで返す。
+/// (draft-ietf-moq-transport-21 §9.1 (SETUP) / §16.4 (Setup Options))
 ///
 /// `SetupOptions` は列挙 API を持たないため、エンコード結果を走査する。
-fn moqt_implementation(options: &SetupOptions) -> Option<Vec<u8>> {
-    let mut buf = Vec::new();
-    options.encode(&mut buf).ok()?;
+fn setup_options_to_python(py: Python<'_>, options: &SetupOptions) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+
+    // AUTHORIZATION_TOKEN は Token 構造であり生バイト列では意味を成さないため、
+    // moqt-rs の accessor から取り出して Token の辞書にする
+    let tokens = options.authorization_tokens();
+    if !tokens.is_empty() {
+        let list = PyList::empty(py);
+        for token in tokens {
+            let token = parameter_value_to_python(
+                py,
+                &MessageParameterValue::AuthorizationToken(token.clone()),
+            )?;
+            list.append(token)?;
+        }
+        dict.set_item(SETUP_OPTION_AUTHORIZATION_TOKEN, list)?;
+    }
 
     // SETUP の本体は delta-key エンコードされた KVP 列である
     // (draft-ietf-moq-transport-21 §9.1 (SETUP))。偶数型は varint、
-    // 奇数型は長さ付きバイト列として読み飛ばす
+    // 奇数型は長さ付きバイト列として読む
+    let mut buf = Vec::new();
+    options.encode(&mut buf).map_err(runtime_error)?;
+
     let mut offset = 0;
     let mut previous_type = 0u64;
     while offset < buf.len() {
-        let (delta, consumed) = varint::decode(&buf[offset..]).ok()?;
+        let (delta, consumed) = varint::decode(&buf[offset..]).map_err(codec_error)?;
         offset += consumed;
-        let option_type = previous_type.checked_add(delta)?;
+        let option_type = previous_type
+            .checked_add(delta)
+            .ok_or_else(|| codec_error("setup option type overflow"))?;
         previous_type = option_type;
 
-        if option_type % 2 == 0 {
-            let (_, consumed) = varint::decode(&buf[offset..]).ok()?;
+        if option_type.is_multiple_of(2) {
+            let (value, consumed) = varint::decode(&buf[offset..]).map_err(codec_error)?;
             offset += consumed;
+            dict.set_item(option_type, value)?;
             continue;
         }
-        let (length, consumed) = varint::decode(&buf[offset..]).ok()?;
+
+        let (length, consumed) = varint::decode(&buf[offset..]).map_err(codec_error)?;
         offset += consumed;
-        let length = usize::try_from(length).ok()?;
-        if buf.len() < offset + length {
-            return None;
+        let length =
+            usize::try_from(length).map_err(|_| codec_error("setup option length is too large"))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| codec_error("setup option length is too large"))?;
+        if buf.len() < end {
+            return Err(codec_error(
+                "setup option length exceeds the remaining bytes",
+            ));
         }
-        if option_type == SETUP_OPTION_MOQT_IMPLEMENTATION {
-            return Some(buf[offset..offset + length].to_vec());
+        // AUTHORIZATION_TOKEN は Token 構造として別途取り出し済みである
+        if option_type != SETUP_OPTION_AUTHORIZATION_TOKEN {
+            dict.set_item(option_type, PyBytes::new(py, &buf[offset..end]))?;
         }
-        offset += length;
+        offset = end;
     }
-    None
+
+    Ok(dict.unbind())
+}
+
+/// Python 側の値から Setup Option の値を作る。
+///
+/// 偶数型の Setup Option は varint、奇数型は長さ付きバイト列で表現する
+/// (draft-ietf-moq-transport-21 §16.4 (Setup Options))。AUTHORIZATION_TOKEN (0x03)
+/// だけは Token 構造を持つ
+/// (draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN))。
+fn setup_option_value_from_python(
+    option_type: u64,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<SetupOptionValue> {
+    if option_type == SETUP_OPTION_AUTHORIZATION_TOKEN {
+        return Ok(SetupOptionValue::AuthorizationToken(
+            authorization_token_from_python(value)?,
+        ));
+    }
+    if option_type.is_multiple_of(2) {
+        return Ok(SetupOptionValue::VarInt(value.extract::<u64>()?));
+    }
+    Ok(SetupOptionValue::Bytes(value.extract::<Vec<u8>>()?))
+}
+
+/// Python 側の値から AUTHORIZATION_TOKEN の Token 構造を作る。
+///
+/// `kind` で種別を指定する辞書と、`(token_type, token_value)` のタプルを受け付ける。
+/// 種別は draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の
+/// DELETE / REGISTER / USE_ALIAS / USE_VALUE である。
+fn authorization_token_from_python(value: &Bound<'_, PyAny>) -> PyResult<AuthorizationToken> {
+    let Ok(dict) = value.cast::<PyDict>() else {
+        // Alias を使わない USE_VALUE はタプルでも指定できる
+        let (token_type, token_value) = value.extract::<(u64, Vec<u8>)>()?;
+        return Ok(AuthorizationToken::UseValue {
+            token_type,
+            token_value,
+        });
+    };
+
+    let kind = token_str_item(dict, "kind")?;
+    match kind.as_str() {
+        "delete" => Ok(AuthorizationToken::Delete {
+            alias: token_varint_item(dict, "alias")?,
+        }),
+        "register" => Ok(AuthorizationToken::Register {
+            alias: token_varint_item(dict, "alias")?,
+            token_type: token_varint_item(dict, "token_type")?,
+            token_value: token_bytes_item(dict, "token_value")?,
+        }),
+        "use_alias" => Ok(AuthorizationToken::UseAlias {
+            alias: token_varint_item(dict, "alias")?,
+        }),
+        "use_value" => Ok(AuthorizationToken::UseValue {
+            token_type: token_varint_item(dict, "token_type")?,
+            token_value: token_bytes_item(dict, "token_value")?,
+        }),
+        other => Err(PyValueError::new_err(format!(
+            "unknown authorization token kind: {other}"
+        ))),
+    }
+}
+
+/// AUTHORIZATION_TOKEN の辞書から必須の種別名を取り出す。
+fn token_str_item(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
+    let item = dict
+        .get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("authorization token requires {key}")))?;
+    item.extract::<String>()
+}
+
+/// AUTHORIZATION_TOKEN の辞書から必須の varint 値を取り出す。
+fn token_varint_item(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<u64> {
+    let item = dict
+        .get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("authorization token requires {key}")))?;
+    item.extract::<u64>()
+}
+
+/// AUTHORIZATION_TOKEN の辞書から必須のバイト列を取り出す。
+fn token_bytes_item(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<u8>> {
+    let item = dict
+        .get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("authorization token requires {key}")))?;
+    item.extract::<Vec<u8>>()
 }
 
 /// 制御メッセージを Python 側の辞書へ変換する。
@@ -573,11 +691,7 @@ pub(crate) fn message_body_to_python(
     let dict = PyDict::new(py);
     match message {
         ControlMessage::Setup(setup) => {
-            let options = PyDict::new(py);
-            if let Some(value) = moqt_implementation(&setup.options) {
-                options.set_item(SETUP_OPTION_MOQT_IMPLEMENTATION, PyBytes::new(py, &value))?;
-            }
-            dict.set_item("options", options)?;
+            dict.set_item("options", setup_options_to_python(py, &setup.options)?)?;
         }
         ControlMessage::Goaway(goaway) => {
             dict.set_item("new_session_uri", PyBytes::new(py, &goaway.new_session_uri))?;
@@ -1098,6 +1212,11 @@ pub(crate) struct CoreSession {
     pending_subgroup_objects: HashMap<u64, DecodedSubgroupObject>,
     /// ペイロードの到着を待っている fetch オブジェクト (stream_id 索引)。
     pending_fetch_entries: HashMap<u64, DecodedFetchEntry>,
+    /// peer が SETUP で宣言した Setup Option。
+    ///
+    /// 状態機械は peer の Setup Options をそのまま保持しないため、受信時に控える。
+    /// SETUP を受信していない場合は `None`。
+    peer_setup_options: Option<SetupOptions>,
     /// 状態機械が通知した直近のエラー理由 (診断用)。
     ///
     /// ライブラリがプロトコル違反を検出するとセッションを閉じるイベントを
@@ -1115,7 +1234,11 @@ pub(crate) struct CoreSession {
 }
 
 impl CoreSession {
-    fn new(client: bool, implementation: &str) -> PyResult<Self> {
+    fn new(
+        client: bool,
+        implementation: &str,
+        setup_options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         if implementation.is_empty() {
             return Err(PyValueError::new_err("implementation must not be empty"));
         }
@@ -1135,6 +1258,23 @@ impl CoreSession {
             value: SetupOptionValue::Bytes(implementation.as_bytes().to_vec()),
         });
 
+        // アプリが指定した Setup Option を追加する。MOQT_IMPLEMENTATION は
+        // `implementation` 引数が担うため、二重に指定させない
+        if let Some(setup_options) = setup_options {
+            for (key, item) in setup_options.iter() {
+                let option_type = key.extract::<u64>()?;
+                if option_type == SETUP_OPTION_MOQT_IMPLEMENTATION {
+                    return Err(PyValueError::new_err(
+                        "MOQT_IMPLEMENTATION is specified by the implementation argument",
+                    ));
+                }
+                options.push(SetupOption {
+                    option_type,
+                    value: setup_option_value_from_python(option_type, &item)?,
+                });
+            }
+        }
+
         let session = if client {
             Session::new_client(Transport::WebTransport, options)
         } else {
@@ -1153,6 +1293,7 @@ impl CoreSession {
             data_headers: HashMap::new(),
             pending_subgroup_objects: HashMap::new(),
             pending_fetch_entries: HashMap::new(),
+            peer_setup_options: None,
             last_error: None,
             data_stream_types_received: HashSet::new(),
             data_headers_decoded: HashSet::new(),
@@ -1489,17 +1630,37 @@ fn request_stream_end(
 #[pymethods]
 impl CoreSession {
     /// client role の MoQT Session を作成する。
+    ///
+    /// `setup_options` は Setup Option Type をキーにした辞書である。偶数型は `int`、
+    /// 奇数型は `bytes`、AUTHORIZATION_TOKEN は Token の辞書またはそのリストを渡す。
+    /// MOQT_IMPLEMENTATION は `implementation` 引数が担うため指定できない
+    /// (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
     #[staticmethod]
-    #[pyo3(signature = (implementation="moqt-py"))]
-    fn client(implementation: &str) -> PyResult<Self> {
-        Self::new(true, implementation)
+    #[pyo3(signature = (implementation="moqt-py", setup_options=None))]
+    fn client(implementation: &str, setup_options: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        Self::new(true, implementation, setup_options)
     }
 
     /// server role の MoQT Session を作成する。
+    ///
+    /// 引数の意味は `client` と同じである。
     #[staticmethod]
-    #[pyo3(signature = (implementation="moqt-py"))]
-    fn server(implementation: &str) -> PyResult<Self> {
-        Self::new(false, implementation)
+    #[pyo3(signature = (implementation="moqt-py", setup_options=None))]
+    fn server(implementation: &str, setup_options: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        Self::new(false, implementation, setup_options)
+    }
+
+    /// peer が SETUP で宣言した Setup Option を返す。
+    ///
+    /// キーは Setup Option Type、値は偶数型なら `int`、奇数型なら `bytes` である。
+    /// AUTHORIZATION_TOKEN は Token の辞書のリストになる。SETUP を受信していない
+    /// 場合は空の辞書を返す。
+    /// (draft-ietf-moq-transport-21 §9.1 (SETUP) / §16.4 (Setup Options))
+    fn peer_setup_options(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        match &self.peer_setup_options {
+            Some(options) => setup_options_to_python(py, options),
+            None => Ok(PyDict::new(py).unbind()),
+        }
     }
 
     /// 自側制御ストリームの stream type prefix と SETUP を返す。
@@ -1550,6 +1711,11 @@ impl CoreSession {
             .try_decode_message()
             .map_err(runtime_error)?
         {
+            // peer の SETUP は状態機械がそのままは保持しないため、Python から
+            // 参照できるよう受信時に控える (draft-ietf-moq-transport-21 §9.1 (SETUP))
+            if let ControlMessage::Setup(setup) = &message {
+                self.peer_setup_options = Some(setup.options.clone());
+            }
             if let Err(error) = self.session.recv_control(message) {
                 return Err(runtime_error(error));
             }

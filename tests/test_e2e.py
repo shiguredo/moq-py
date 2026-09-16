@@ -74,6 +74,13 @@ async def test_client_and_server_exchange_setup_over_webtransport(moq_pair: MoqP
     assert moq_pair.client.established
     assert moq_pair.session.session_id >= 0
     assert moq_pair.session.address[0] == "127.0.0.1"
+    # peer が SETUP で宣言した Setup Option が client と server の両方から見える
+    # (draft-ietf-moq-transport-21 §16.4 (Setup Options))
+    assert moq_pair.client.peer_setup_options[moqt.SETUP_OPTION_MOQT_IMPLEMENTATION] == b"moqt-py"
+    assert (
+        moq_pair.session.runtime.peer_setup_options[moqt.SETUP_OPTION_MOQT_IMPLEMENTATION]
+        == b"moqt-py"
+    )
 
 
 async def test_two_clients_connect_to_one_server(moq_client_factory: ClientFactory) -> None:

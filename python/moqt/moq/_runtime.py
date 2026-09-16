@@ -305,11 +305,16 @@ class Runtime:
         on_task_error: Callable[[BaseException], Awaitable[None]] | None = None,
         control_message_timeout: float | None = None,
         data_stream_timeout: float | None = None,
+        setup_options: dict[int, object] | None = None,
     ) -> None:
+        # Setup Option は SETUP の交換でだけ使う。MOQT_IMPLEMENTATION は
+        # implementation 引数が担うため setup_options には含めない
+        # (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
+        options = dict(setup_options) if setup_options is not None else None
         self._core = (
-            _native.Session.client(implementation)
+            _native.Session.client(implementation, options)
             if client
-            else _native.Session.server(implementation)
+            else _native.Session.server(implementation, options)
         )
         # タイムアウトは既定で無効である。設定すると tick が期限を判定し、期限切れの
         # セッションを SESSION_CONTROL_MESSAGE_TIMEOUT / SESSION_DATA_STREAM_TIMEOUT で
@@ -350,6 +355,17 @@ class Runtime:
     def established(self) -> bool:
         """SETUP 交換が完了しているかを返す。"""
         return self._core.established
+
+    @property
+    def peer_setup_options(self) -> dict[int, object]:
+        """peer が SETUP で宣言した Setup Option を返す。
+
+        キーは Setup Option Type、値は偶数型なら `int`、奇数型なら `bytes` である。
+        AUTHORIZATION_TOKEN は Token の辞書のリストになる。SETUP を受信して
+        いない場合は空の辞書を返す
+        (draft-ietf-moq-transport-21 §9.1 (SETUP) / §16.4 (Setup Options))。
+        """
+        return dict(self._core.peer_setup_options())
 
     @property
     def closed(self) -> bool:

@@ -233,6 +233,7 @@ class Client:
         implementation: str = "moqt-py",
         control_message_timeout: float | None = None,
         data_stream_timeout: float | None = None,
+        setup_options: dict[int, object] | None = None,
     ) -> None:
         """client を作成する。
 
@@ -240,6 +241,12 @@ class Client:
         期限 (秒) である。省略した場合は期限を設けない。設定すると期限切れで
         セッションが終了する
         (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+
+        `setup_options` は SETUP で送る Setup Option である。キーは Setup Option Type、
+        値は偶数型なら `int`、奇数型なら `bytes`、AUTHORIZATION_TOKEN なら Token の
+        辞書またはそのリストである。MOQT_IMPLEMENTATION は `implementation` 引数が
+        担うため指定できない
+        (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
         """
         self._transport = h3.Client(
             url=url,
@@ -250,6 +257,7 @@ class Client:
         self._implementation = implementation
         self._control_message_timeout = control_message_timeout
         self._data_stream_timeout = data_stream_timeout
+        self._setup_options = dict(setup_options) if setup_options is not None else None
         self._runtime: Runtime | None = None
         self._established_event = asyncio.Event()
         self._connect_error: BaseException | None = None
@@ -284,6 +292,17 @@ class Client:
         """MoQT SETUP 交換が完了しているかを返す。"""
         runtime = self._runtime
         return runtime is not None and runtime.established
+
+    @property
+    def peer_setup_options(self) -> dict[int, object]:
+        """peer が SETUP で宣言した Setup Option。
+
+        キーは Setup Option Type、値は偶数型なら `int`、奇数型なら `bytes` である。
+        AUTHORIZATION_TOKEN は Token の辞書のリストになる。未接続の場合は空の辞書を
+        返す (draft-ietf-moq-transport-21 §16.4 (Setup Options))。
+        """
+        runtime = self._runtime
+        return {} if runtime is None else runtime.peer_setup_options
 
     @property
     def peer_goaway(self) -> PeerGoaway | None:
@@ -336,6 +355,7 @@ class Client:
             on_task_error=self._on_task_error,
             control_message_timeout=self._control_message_timeout,
             data_stream_timeout=self._data_stream_timeout,
+            setup_options=self._setup_options,
         )
         self._run_task = asyncio.create_task(self._transport.run())
         self._run_task.add_done_callback(self._on_run_done)
