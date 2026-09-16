@@ -723,22 +723,14 @@ class Server:
             )
             await self._publish_callback(request)
             return
-        if event.kind not in {"subscribe", "track_status"}:
-            # 未対応の request は REQUEST_NOT_SUPPORTED で拒否する
+        if event.kind != "subscribe":
+            # 未対応の request は REQUEST_NOT_SUPPORTED で拒否する。
+            # 状態機械が request として受理するのは SUBSCRIBE / PUBLISH / FETCH だけであり、
+            # それ以外はコールバックへ届かないため、ここで扱うのは SUBSCRIBE のみである
             await runtime.send_request_error(
                 event.request_id or 0,
                 moqt.REQUEST_NOT_SUPPORTED,
                 f"{event.kind} is not supported",
-            )
-            return
-        if event.kind == "track_status":
-            # TRACK_STATUS は relay が返す応答であり、endpoint は購読の一部として
-            # 応答できない。名前空間の探索を伴わないため DOES_NOT_EXIST を返す
-            # (moqt-rs の `recv_request` も TRACK_STATUS を受理しない)。
-            await runtime.send_request_error(
-                event.request_id or 0,
-                moqt.REQUEST_DOES_NOT_EXIST,
-                "TRACK_STATUS is not answered by an endpoint",
             )
             return
         if self._on_subscribe is None:
