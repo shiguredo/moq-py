@@ -818,9 +818,12 @@ class Runtime:
                 f"stream for request {request_id} carries objects {expected} properties; "
                 "properties must be consistent within a subgroup"
             )
+        # Object ID は subgroup ストリーム内の差分として表現する。新しいストリームを
+        # 開く場合は絶対値で書くため、直前の Group の Object ID を基準にしない
+        # (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
         delta = (
             object_id
-            if writer is None or writer.last_object_id is None
+            if opens_stream or writer is None or writer.last_object_id is None
             else object_id - writer.last_object_id - 1
         )
         # 状態機械が OBJECT_PROPERTY_FILTER を評価するバイト列と、wire へ書く

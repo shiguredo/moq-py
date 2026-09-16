@@ -224,6 +224,36 @@ async def test_subscribe_and_receive_objects_over_subgroup(moq_pair: MoqPair) ->
     assert [item.payload for item in received] == [b"first", b"second"]
 
 
+async def test_objects_in_a_second_group_are_delivered(moq_pair: MoqPair) -> None:
+    """
+    同じ subscription で Group を進めてもオブジェクトが届くことを確認する。
+
+    subgroup ストリームの最初のオブジェクトの Object ID は絶対値であり、直前の Group の
+    Object ID を基準にした差分ではない
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    publication = published[0]
+    await publication.send_object(1, 0, b"first")
+    await publication.send_object(1, 1, b"second")
+    # Group を進めると新しい subgroup ストリームが開き、Object ID は絶対値に戻る
+    await publication.send_object(2, 0, b"third")
+
+    received = await _take_objects(subscription, 3)
+
+    assert [(item.group_id, item.object_id) for item in received] == [(1, 0), (1, 1), (2, 0)]
+    assert [item.payload for item in received] == [b"first", b"second", b"third"]
+
+
 async def test_object_properties_are_delivered(moq_pair: MoqPair) -> None:
     """
     subgroup で送った Object Properties が受信側で参照できることを確認する。
