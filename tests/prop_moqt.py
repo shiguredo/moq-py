@@ -9,11 +9,26 @@ from moqt.moqt import (
     GREASE_MAX,
     MANDATORY_TRACK_PROPERTY_MAX,
     MANDATORY_TRACK_PROPERTY_MIN,
+    PARAM_AUTHORIZATION_TOKEN,
+    PARAM_EXPIRES,
+    PARAM_FILL_PARAMETERS,
+    PARAM_FILL_TIMEOUT,
+    PARAM_FORWARD,
+    PARAM_GROUP_ORDER,
+    PARAM_LARGEST_OBJECT,
+    PARAM_LOCATION_FILTER,
+    PARAM_NEW_GROUP_REQUEST,
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_TRACK_NAMESPACE_PREFIX,
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
     PROP_DEFAULT_PUBLISHER_PRIORITY,
     PROP_DYNAMIC_GROUPS,
     PROP_IMMUTABLE_PROPERTIES,
     PUBLISHER_PRIORITY_DEFAULT,
+    LocationFilter,
+    MessageParameters,
     ObjectProperties,
     Session,
     TrackProperties,
@@ -441,6 +456,152 @@ def prop_track_properties_encode_matches_session_output(
     for prop_type, value in message.body["track_properties"].items():
         received.add(prop_type, value)
     assert received.encode() == encoded
+
+
+# Message Parameter の型番号と値の上限。
+#
+# vi64 は 62 bit まで運べる (draft-ietf-moq-transport-21 §1.4 (Varint Encoding))。
+MAX_MESSAGE_PARAMETER_VALUE = 2**62 - 1
+
+# 値が vi64 のパラメータ型 (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+VARINT_PARAMETER_TYPES = (
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_FILL_TIMEOUT,
+    PARAM_EXPIRES,
+    PARAM_NEW_GROUP_REQUEST,
+)
+
+# LOCATION_FILTER の種別 (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+LOCATION_FILTER_KINDS = (
+    "relative_group",
+    "next_object",
+    "absolute_start",
+    "absolute_range",
+    "absolute_range_with_end",
+)
+
+
+@st.composite
+def _location_filters(draw: st.DrawFn) -> LocationFilter:
+    """任意の LOCATION_FILTER を生成する。"""
+    kind = draw(st.sampled_from(LOCATION_FILTER_KINDS))
+    fields: dict[str, int] = {}
+    if kind != "next_object":
+        fields["start_group"] = draw(
+            st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)
+        )
+    if kind in ("absolute_start", "absolute_range", "absolute_range_with_end"):
+        fields["start_object"] = draw(
+            st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)
+        )
+    if kind in ("absolute_range", "absolute_range_with_end"):
+        # End Group は Start Group からの差分であり、和が vi64 に収まる必要がある
+        fields["end_group_delta"] = draw(
+            st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)
+        )
+    if kind == "absolute_range_with_end":
+        fields["end_object"] = draw(st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE))
+    location_filter = LocationFilter(kind, **fields)
+    # Start が両方 0 の absolute_start は wire 上で next_object と区別できないため、
+    # 往復が一致する組み合わせだけを生成する
+    if kind == "absolute_start" and fields["start_group"] == 0 and fields["start_object"] == 0:
+        return LocationFilter("next_object")
+    return location_filter
+
+
+@st.composite
+def _message_parameters(draw: st.DrawFn) -> dict[int, object]:
+    """型ごとの Python 表現で任意の Message Parameter の辞書を生成する。
+
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
+    """
+    parameters: dict[int, object] = {}
+    for param_type in draw(
+        st.lists(
+            st.sampled_from(VARINT_PARAMETER_TYPES),
+            unique=True,
+            max_size=len(VARINT_PARAMETER_TYPES),
+        )
+    ):
+        parameters[param_type] = draw(
+            st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)
+        )
+    if draw(st.booleans()):
+        # FORWARD は 0 または 1 である
+        parameters[PARAM_FORWARD] = draw(st.integers(min_value=0, max_value=1))
+    if draw(st.booleans()):
+        # GROUP_ORDER は 1 (Ascending) または 2 (Descending) である
+        parameters[PARAM_GROUP_ORDER] = draw(st.integers(min_value=1, max_value=2))
+    if draw(st.booleans()):
+        parameters[PARAM_SUBSCRIBER_PRIORITY] = draw(st.integers(min_value=0, max_value=255))
+    if draw(st.booleans()):
+        parameters[PARAM_LARGEST_OBJECT] = (
+            draw(st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)),
+            draw(st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)),
+        )
+    if draw(st.booleans()):
+        parameters[PARAM_LOCATION_FILTER] = draw(_location_filters())
+    if draw(st.booleans()):
+        # namespace のフィールドは空にできず、合計 4096 バイト以下である
+        parameters[PARAM_TRACK_NAMESPACE_PREFIX] = draw(
+            st.lists(st.binary(min_size=1, max_size=8), max_size=4)
+        )
+    if draw(st.booleans()):
+        # FILL_PARAMETERS の内側は FILL_TIMEOUT だけを生成する
+        parameters[PARAM_FILL_PARAMETERS] = {
+            PARAM_FILL_TIMEOUT: draw(
+                st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE)
+            )
+        }
+    if draw(st.booleans()):
+        # 同じ (Token Type, Token Value) の組は重複できない
+        tokens = draw(
+            st.lists(
+                st.tuples(
+                    st.integers(min_value=0, max_value=MAX_MESSAGE_PARAMETER_VALUE),
+                    st.binary(max_size=8),
+                ),
+                max_size=3,
+                unique=True,
+            )
+        )
+        if tokens:
+            parameters[PARAM_AUTHORIZATION_TOKEN] = tokens
+    return parameters
+
+
+@given(parameters=_message_parameters())
+def prop_message_parameters_round_trip(parameters: dict[int, object]) -> None:
+    """
+    Message Parameter がエンコード済みバイト列の辞書と往復することを確認する。
+
+    `to_dict()` は `Event.parameters` / `Message.parameters` と同じ形式の辞書を返し、
+    その辞書から構築し直した集合は元と一致する
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+    """
+    built = MessageParameters(parameters)
+
+    encoded = built.to_dict()
+
+    assert MessageParameters(encoded) == built
+    assert MessageParameters(encoded).to_dict() == encoded
+
+
+@given(location_filter=_location_filters())
+def prop_location_filter_round_trip(location_filter: LocationFilter) -> None:
+    """
+    LOCATION_FILTER が wire 形式のバイト列と往復することを確認する。
+
+    フィールド数が値の意味を決め、AbsoluteStart の {0, 0} だけは NextObject へ
+    正規化される (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+    """
+    encoded = location_filter.encode()
+
+    decoded = LocationFilter.decode(encoded)
+
+    assert decoded.encode() == encoded
+    assert LocationFilter.decode(decoded.encode()) == decoded
 
 
 # GREASE 値の連番 (`0x7F * N + 0x9D` の N) として取り得る最大値。

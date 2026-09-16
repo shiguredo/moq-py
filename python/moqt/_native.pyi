@@ -1062,6 +1062,105 @@ class LocProperties:
         """
 
 @final
+class LocationFilter:
+    """
+    LOCATION_FILTER (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter)) の
+    型付き表現。
+    
+    wire 形式は Length-prefixed な optional vi64 群であり、Length (バイト数) で
+    フィールド数が決まる。フィールド数と意味の対応は次のとおりである。
+    
+    - 1 フィールド: StartGroup (Largest Object 相対)
+    - 2 フィールド: StartGroup + StartObject (両方 0 なら Next Object、そうでなければ absolute)
+    - 3 フィールド: absolute Start + EndGroupDelta (End Group の全 Object を含む)
+    - 4 フィールド: absolute Start + EndGroupDelta + EndObject
+    
+    `kind` は `relative_group` / `next_object` / `absolute_start` / `absolute_range` /
+    `absolute_range_with_end` のいずれかであり、種別ごとに必要なフィールドが異なる。
+    過不足のあるフィールドを渡すと `ValueError` になる。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, kind: str, start_group: int |None = None, start_object: int |None = None, end_group_delta: int |None = None, end_object: int |None = None) -> LocationFilter:
+        """
+        LOCATION_FILTER を組み立てる。
+        
+        `kind` ごとに必要なフィールドは次のとおりである。
+        
+        - `relative_group`: `start_group`
+        - `next_object`: なし
+        - `absolute_start`: `start_group` / `start_object`
+        - `absolute_range`: `start_group` / `start_object` / `end_group_delta`
+        - `absolute_range_with_end`: `start_group` / `start_object` / `end_group_delta` /
+          `end_object`
+        """
+    def __repr__(self, /) -> str: ...
+    @staticmethod
+    def decode(data: bytes) -> LocationFilter:
+        """
+        wire format のバイト列から LOCATION_FILTER を読み込む。
+        
+        フィールド数が 0 または 5 以上の場合と、壊れた vi64 は `ValueError` になる
+        (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+        """
+    def encode(self, /) -> bytes:
+        """
+        LOCATION_FILTER の値部分をバイト列へ書き出す。
+        
+        書き出したバイト列は `MessageParameters` の辞書の値として渡せる
+        (パラメータ 1 件分のエンコード済みバイト列)。
+        """
+    @property
+    def end_group_delta(self, /) -> int |None:
+        """
+        開始 Group からの End Group の差分 (`absolute_range*` のみ)。
+        """
+    @property
+    def end_object(self, /) -> int |None:
+        """
+        終端 Group 内の終端 Object ID (`absolute_range_with_end` のみ)。
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        フィルタの種別。
+        """
+    @property
+    def start_group(self, /) -> int |None:
+        """
+        Largest Object からの相対オフセット (`relative_group` のみ)。
+        """
+    @property
+    def start_object(self, /) -> int |None:
+        """
+        開始 Location の Object ID (`absolute_*` のみ)。
+        """
+
+@final
+class LocationFilterUpdate:
+    """
+    LOCATION_FILTER の更新指示 (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))。
+    
+    REQUEST_UPDATE では Length 0 がフィルタの削除を表す。パラメータの省略 (値の変更なし)
+    と区別するために 3 状態で返す。`kind` は `unchanged` / `removed` / `set` のいずれかで
+    あり、`set` のときだけ `filter` が入る。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __repr__(self, /) -> str: ...
+    @property
+    def filter(self, /) -> LocationFilter |None:
+        """
+        `kind` が `set` のときの新しいフィルタ。
+        """
+    @property
+    def kind(self, /) -> str:
+        """
+        `unchanged` / `removed` / `set` のいずれか。
+        """
+
+@final
 class MediaTimeline:
     """
     MSF メディアタイムライン (draft-ietf-moq-msf-01 §7.1)。
@@ -1153,6 +1252,197 @@ class Message:
     def type_id(self, /) -> int:
         """
         wire 上のメッセージ Type (vi64)。
+        """
+
+@final
+class MessageParameters:
+    """
+    Message Parameters (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+    
+    `Event.parameters` / `Message.parameters` が返す「型番号をキーにしたエンコード済み
+    バイト列の辞書」と同じ内容を、draft が定める値の型と意味で読み書きする。
+    辞書からは [`MessageParameters::new`] で構築でき、[`MessageParameters::to_dict`] で
+    辞書へ戻せる。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __len__(self, /) -> int: ...
+    def __new__(cls, /, parameters: dict |None = None) -> MessageParameters:
+        """
+        パラメータの集合を作成する。
+        
+        `parameters` は `Event.parameters` / `Message.parameters` が返す辞書と同じ形式で
+        ある。キーはパラメータ型、値はパラメータ 1 件分のエンコード済みバイト列であり、
+        `AUTHORIZATION_TOKEN` は複数回出現できるためバイト列のリストで指定する。
+        省略した場合は空の集合になる。
+        
+        `bytes` 以外の値は型ごとの Python 表現としても受け取る。`uint8` と `vi64` の
+        パラメータは `int`、`LARGEST_OBJECT` は `(group_id, object_id)`、
+        `TRACK_NAMESPACE_PREFIX` は `bytes` のリスト、`FILL_PARAMETERS` は入れ子の辞書、
+        `AUTHORIZATION_TOKEN` は `(token_type, token_value)` である。`LOCATION_FILTER`
+        には [`LocationFilter`] も渡せる。
+        
+        長さ付きバイト列のパラメータは、長さプレフィックスを含むエンコード済みの値を
+        要求する。長さが合わない値と解釈できない値は `ValueError` になる。
+        """
+    def __repr__(self, /) -> str: ...
+    def authorization_tokens(self, /) -> list[Any]:
+        """
+        AUTHORIZATION_TOKEN (type 0x03) の値を出現順に返す
+        (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))。
+        
+        各要素は `decode_parameter` が返すものと同じ辞書である。AUTHORIZATION_TOKEN は
+        同一メッセージ内で複数回出現できる。
+        """
+    @property
+    def expires(self, /) -> int |None:
+        """
+        EXPIRES (type 0x08) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter))。
+        
+        値が 0 の場合と、パラメータが無い場合はどちらも `None` になる。0 を指定された
+        ことを区別するには [`MessageParameters::has_expires`] を使う。
+        """
+    @property
+    def fill_parameters(self, /) -> MessageParameters |None:
+        """
+        FILL_PARAMETERS (type 0x23) の内側のパラメータ群を返す
+        (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))。
+        
+        内側は外側とは別のパラメータスコープであり、パラメータが無い場合は `None` になる。
+        """
+    @property
+    def fill_timeout(self, /) -> int |None:
+        """
+        FILL_TIMEOUT (type 0x0A) の値をミリ秒で返す
+        (draft-ietf-moq-transport-21 §9.20.6 (FILL TIMEOUT Parameter))。
+        """
+    @property
+    def forward(self, /) -> int |None:
+        """
+        FORWARD (type 0x10) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter))。
+        
+        0 は転送しない、1 は転送するである。
+        """
+    @property
+    def group_order(self, /) -> int |None:
+        """
+        GROUP_ORDER (type 0x22) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+        """
+    @property
+    def has_expires(self, /) -> bool:
+        """
+        EXPIRES (type 0x08) が存在するかを返す。
+        
+        EXPIRES=0 もパラメータとしては存在するため `True` になる。
+        """
+    @property
+    def has_range_filters(self, /) -> bool:
+        """
+        Range Filter を 1 つ以上持つかを返す
+        (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+        """
+    @property
+    def include_properties(self, /) -> int |None:
+        """
+        INCLUDE_PROPERTIES (type 0x35) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter))。
+        
+        0 は Properties を送らない、1 は送るである。パラメータが無い場合の既定は 1 で
+        あるため、判定する側が既定を補う。
+        """
+    @property
+    def largest_object(self, /) -> tuple[int, int] |None:
+        """
+        LARGEST_OBJECT (type 0x09) の値を `(group_id, object_id)` として返す
+        (draft-ietf-moq-transport-21 §9.20.9 (LARGEST_OBJECT Parameter))。
+        """
+    @property
+    def location_filter(self, /) -> bytes |None:
+        """
+        LOCATION_FILTER (type 0x21) のフィルタ本体をバイト列として返す。
+        
+        長さプレフィックスを含まないため、[`LocationFilter::decode`] へそのまま渡せる。
+        解釈した値が必要な場合は [`MessageParameters::location_filter_typed`] を使う。
+        """
+    @property
+    def location_filter_typed(self, /) -> LocationFilter |None:
+        """
+        LOCATION_FILTER (type 0x21) を [`LocationFilter`] として返す。
+        
+        パラメータが無い場合と Length 0 (no filter) の場合は `None` になる。
+        REQUEST_UPDATE での削除指示と省略を区別する場合は
+        [`MessageParameters::location_filter_update`] を使う。
+        """
+    @property
+    def location_filter_update(self, /) -> LocationFilterUpdate:
+        """
+        LOCATION_FILTER (type 0x21) の更新指示を返す
+        (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))。
+        
+        `kind` が `unchanged` なら省略、`removed` なら Length 0 による削除、
+        `set` なら `filter` への置き換えである。
+        """
+    @property
+    def new_group_request(self, /) -> int |None:
+        """
+        NEW_GROUP_REQUEST (type 0x32) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.20 (NEW_GROUP_REQUEST Parameter))。
+        """
+    @property
+    def object_delivery_timeout(self, /) -> int |None:
+        """
+        OBJECT_DELIVERY_TIMEOUT (type 0x02) の値をミリ秒で返す
+        (draft-ietf-moq-transport-21 §9.20.2 (OBJECT_DELIVERY_TIMEOUT Parameter))。
+        """
+    @property
+    def range_filter_count(self, /) -> int:
+        """
+        Range Filter の個数を返す
+        (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+        """
+    def range_filters(self, /, param_type: int) -> list[bytes]:
+        """
+        指定した Range Filter 型 (0x25-0x29) の全インスタンスのフィルタ本体を出現順に返す
+        (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+        
+        Range Filter は同一 Parameter Type が同一メッセージ内で複数回出現できるため、
+        単一の値ではなく列として返す。長さプレフィックスは含まない。Range Filter 型以外を
+        渡した場合は空のリストになる。
+        """
+    def set_largest_object(self, /, group_id: int, object_id: int) -> None:
+        """
+        LARGEST_OBJECT (type 0x09) を設定する。
+        
+        既に値がある場合は置き換える。
+        """
+    @property
+    def subgroup_delivery_timeout(self, /) -> int |None:
+        """
+        SUBGROUP_DELIVERY_TIMEOUT (type 0x06) の値をミリ秒で返す
+        (draft-ietf-moq-transport-21 §9.20.4 (SUBGROUP_DELIVERY_TIMEOUT Parameter))。
+        """
+    @property
+    def subscriber_priority(self, /) -> int |None:
+        """
+        SUBSCRIBER_PRIORITY (type 0x20) の値を返す
+        (draft-ietf-moq-transport-21 §9.20.6 (SUBSCRIBER_PRIORITY Parameter))。
+        """
+    def to_dict(self, /) -> dict:
+        """
+        同じ内容を「型番号をキーにしたエンコード済みバイト列の辞書」として返す。
+        
+        `Event.parameters` / `Message.parameters` と同じ形式であり、そのまま
+        [`MessageParameters::new`] へ渡して往復させられる。
+        """
+    @property
+    def track_namespace_prefix(self, /) -> list |None:
+        """
+        TRACK_NAMESPACE_PREFIX (type 0x34) の値を namespace のフィールド列として返す
+        (draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter))。
         """
 
 @final

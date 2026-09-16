@@ -17,6 +17,7 @@ mod core;
 mod errors;
 mod grease;
 mod loc;
+mod message_parameters;
 mod msf;
 mod properties;
 
@@ -89,6 +90,10 @@ mod _native {
     // GREASE のヘルパー (moqt.moqt)
     #[pymodule_export]
     use crate::grease::{generate, is_grease};
+
+    // Message Parameters の型付きアクセサ (moqt.moqt)
+    #[pymodule_export]
+    use crate::message_parameters::{LocationFilter, LocationFilterUpdate, MessageParameters};
 
     // LOC の codec (moqt.loc)
     #[pymodule_export]

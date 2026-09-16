@@ -8,6 +8,11 @@ WebTransport を介した client / server は `moqt.moq` が提供する。
 このモジュールは、ワイヤのバイト列を直接組み立てて検証するテストや、実装が送出した
 バイト列を検査するテストから使う。
 
+`Event.parameters` と `Message.parameters` はパラメータを「型番号をキーにした
+エンコード済みバイト列の辞書」として返す。draft が定める値の型と意味で読み書きする
+場合は `MessageParameters` を使う。`LocationFilter` は `LOCATION_FILTER` の
+型付き表現である。
+
 MoQT は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
@@ -16,7 +21,10 @@ from collections.abc import Callable
 from moqt import _native
 from moqt._native import (
     Event,
+    LocationFilter,
+    LocationFilterUpdate,
     Message,
+    MessageParameters,
     ObjectProperties,
     Session,
     TrackProperties,
@@ -399,7 +407,10 @@ __all__ = [
     "STREAM_TOO_FAR_BEHIND",
     "STREAM_UNKNOWN_OBJECT_STATUS",
     "Event",
+    "LocationFilter",
+    "LocationFilterUpdate",
     "Message",
+    "MessageParameters",
     "ObjectProperties",
     "Session",
     "TrackProperties",

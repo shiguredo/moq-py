@@ -166,7 +166,7 @@ fn reason_from_python(reason: &str) -> PyResult<shiguredo_moqt::message::ReasonP
 ///
 /// `LOCATION_FILTER` などの構造化された値は、ライブラリが解釈できる
 /// エンコード済みバイト列として受け取る。
-fn parameter_value_from_python(
+pub(crate) fn parameter_value_from_python(
     param_type: u64,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<MessageParameterValue> {
@@ -217,7 +217,9 @@ fn parameter_value_from_python(
 ///
 /// キーはパラメータ型、値は型ごとの表現である。AUTHORIZATION_TOKEN は複数回
 /// 指定できるため、値にリストを渡した場合は同じ型を複数回追加する。
-fn message_parameters_from_python(value: &Bound<'_, PyAny>) -> PyResult<MessageParameters> {
+pub(crate) fn message_parameters_from_python(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<MessageParameters> {
     let dict = value.cast::<PyDict>()?;
     let mut parameters = MessageParameters::new();
     for (key, item) in dict.iter() {
@@ -247,7 +249,7 @@ fn message_parameters_from_python(value: &Bound<'_, PyAny>) -> PyResult<MessageP
 ///
 /// 値はパラメータ 1 件分のエンコード済みバイト列である。Python 側で解釈する
 /// 場合は `_decode_parameter` を使う。
-fn message_parameters_to_python(
+pub(crate) fn message_parameters_to_python(
     py: Python<'_>,
     parameters: &MessageParameters,
 ) -> PyResult<Py<PyDict>> {
@@ -343,16 +345,12 @@ pub(crate) fn track_namespace_to_python(
     Ok(fields.unbind())
 }
 
-/// パラメータ 1 件を Python 側の値へ変換する。
+/// パラメータ 1 件分のエンコード済みバイト列をデコードする。
 ///
 /// `value` はパラメータの値部分だけのバイト列である。型と値形式の対応は
 /// パラメータ型ごとに決まっているため、型を付けた 1 件のリストとしてデコードする。
 /// (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
-pub(crate) fn decode_parameter_to_python(
-    py: Python<'_>,
-    param_type: u64,
-    value: &[u8],
-) -> PyResult<Py<PyAny>> {
+pub(crate) fn decode_parameter_entry(param_type: u64, value: &[u8]) -> PyResult<MessageParameter> {
     // パラメータ 1 件だけのリストを組み立てる。KVP の型は直前の型との差分であり、
     // 先頭の直前の型は 0 である (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))
     let mut buf = Vec::new();
@@ -360,10 +358,22 @@ pub(crate) fn decode_parameter_to_python(
     varint::encode(param_type, &mut buf);
     buf.extend_from_slice(value);
     let (parameters, _consumed) = MessageParameters::decode(&buf).map_err(codec_error)?;
-    let parameter = parameters
+    parameters
         .as_slice()
         .first()
-        .ok_or_else(|| PyValueError::new_err("parameter could not be decoded"))?;
+        .cloned()
+        .ok_or_else(|| PyValueError::new_err("parameter could not be decoded"))
+}
+
+/// パラメータ 1 件を Python 側の値へ変換する。
+///
+/// `value` はパラメータの値部分だけのバイト列である。
+pub(crate) fn decode_parameter_to_python(
+    py: Python<'_>,
+    param_type: u64,
+    value: &[u8],
+) -> PyResult<Py<PyAny>> {
+    let parameter = decode_parameter_entry(param_type, value)?;
     parameter_value_to_python(py, &parameter.value)
 }
 

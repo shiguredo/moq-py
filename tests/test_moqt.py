@@ -8,6 +8,8 @@ from moqt.moqt import (
     PROP_PRIOR_GROUP_ID_GAP,
     PROP_PRIOR_OBJECT_ID_GAP,
     Event,
+    LocationFilter,
+    MessageParameters,
     ObjectProperties,
     Session,
     TrackProperties,
@@ -967,6 +969,336 @@ def test_decode_parameter_rejects_a_malformed_value() -> None:
     """型に合わない値のバイト列を拒否することを確認する。"""
     with pytest.raises(ValueError, match="unexpected end of buffer"):
         moqt.decode_parameter(moqt.PARAM_LOCATION_FILTER, b"\xff")
+
+
+# ─── MessageParameters の型付きアクセサ ─────────────────────
+
+
+def test_message_parameters_reads_typed_values() -> None:
+    """
+    パラメータを draft の意味付けで読めることを確認する。
+
+    LARGEST_OBJECT は (Group ID, Object ID)、FORWARD と GROUP_ORDER は uint8、
+    OBJECT_DELIVERY_TIMEOUT と SUBGROUP_DELIVERY_TIMEOUT はミリ秒の vi64 である
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+    """
+    parameters = MessageParameters(
+        {
+            moqt.PARAM_LARGEST_OBJECT: b"\x03\x07",
+            moqt.PARAM_FORWARD: b"\x01",
+            moqt.PARAM_GROUP_ORDER: b"\x01",
+            moqt.PARAM_SUBSCRIBER_PRIORITY: encode_varint(128),
+            moqt.PARAM_OBJECT_DELIVERY_TIMEOUT: encode_varint(1500),
+            moqt.PARAM_SUBGROUP_DELIVERY_TIMEOUT: encode_varint(2500),
+        }
+    )
+
+    assert parameters.largest_object == (3, 7)
+    assert parameters.forward == 1
+    assert parameters.group_order == 1
+    assert parameters.subscriber_priority == 128
+    assert parameters.object_delivery_timeout == 1500
+    assert parameters.subgroup_delivery_timeout == 2500
+    assert len(parameters) == 6
+
+
+def test_message_parameters_reports_absent_values_as_none() -> None:
+    """パラメータを持たない集合では型付きアクセサが `None` を返すことを確認する。"""
+    parameters = MessageParameters()
+
+    assert parameters.largest_object is None
+    assert parameters.forward is None
+    assert parameters.expires is None
+    assert parameters.has_expires is False
+    assert parameters.group_order is None
+    assert parameters.object_delivery_timeout is None
+    assert parameters.subgroup_delivery_timeout is None
+    assert parameters.location_filter_typed is None
+    assert parameters.fill_parameters is None
+    assert parameters.track_namespace_prefix is None
+    assert len(parameters) == 0
+
+
+def test_message_parameters_distinguishes_expires_zero() -> None:
+    """
+    EXPIRES=0 を「パラメータが無い」と区別できることを確認する。
+
+    draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter): EXPIRES が 0 または
+    不在なら subscription は expire しない。`expires` はどちらも `None` にするため、
+    0 が指定されたことは `has_expires` で判定する。
+    """
+    parameters = MessageParameters({moqt.PARAM_EXPIRES: b"\x00"})
+
+    assert parameters.has_expires is True
+    assert parameters.expires is None
+
+
+def test_message_parameters_round_trips_the_encoded_dictionary() -> None:
+    """
+    エンコード済みバイト列の辞書と相互に変換できることを確認する。
+
+    辞書の形式は `Event.parameters` / `Message.parameters` が返すものと同じである。
+    """
+    encoded = {
+        moqt.PARAM_LARGEST_OBJECT: b"\x03\x07",
+        moqt.PARAM_FORWARD: b"\x01",
+        moqt.PARAM_LOCATION_FILTER: b"\x02\x05\x09",
+        moqt.PARAM_TRACK_NAMESPACE_PREFIX: b"\x02\x01a\x01b",
+        moqt.PARAM_AUTHORIZATION_TOKEN: [b"\x05\x03\x01tok"],
+    }
+
+    parameters = MessageParameters(encoded)
+
+    assert parameters.largest_object == (3, 7)
+    assert parameters.forward == 1
+    assert parameters.track_namespace_prefix == [b"a", b"b"]
+    assert parameters.authorization_tokens() == [
+        {"kind": "use_value", "token_type": 1, "token_value": b"tok"}
+    ]
+    assert parameters.to_dict() == encoded
+    assert MessageParameters(parameters.to_dict()) == parameters
+
+
+def test_message_parameters_accepts_typed_values() -> None:
+    """型ごとの Python 表現からも構築できることを確認する。"""
+    parameters = MessageParameters(
+        {
+            moqt.PARAM_LARGEST_OBJECT: (3, 7),
+            moqt.PARAM_FILL_PARAMETERS: {moqt.PARAM_FILL_TIMEOUT: 1000},
+            moqt.PARAM_AUTHORIZATION_TOKEN: [(1, b"tok")],
+        }
+    )
+
+    assert parameters.largest_object == (3, 7)
+    assert parameters.fill_parameters is not None
+    assert parameters.fill_parameters.fill_timeout == 1000
+    assert parameters.authorization_tokens() == [
+        {"kind": "use_value", "token_type": 1, "token_value": b"tok"}
+    ]
+    # エンコード済みの辞書へ戻して構築し直しても同じ内容になる
+    assert MessageParameters(parameters.to_dict()) == parameters
+
+
+def test_message_parameters_rejects_raw_filter_bytes() -> None:
+    """
+    長さプレフィックスを持たないフィルタのバイト列を拒否することを確認する。
+
+    `MessageParameters` が取る辞書の値は `Event.parameters` と同じエンコード済みの
+    バイト列であり、`Session.send_subscribe` などが取る長さプレフィックスを含まない
+    フィルタ本体とは異なる。取り違えを黙って別の値として解釈しないよう、長さが
+    合わない値は拒否する (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+    """
+    with pytest.raises(ValueError, match="requires an encoded value"):
+        MessageParameters({moqt.PARAM_LOCATION_FILTER: LocationFilter("next_object").encode()})
+
+    with pytest.raises(ValueError, match="requires an encoded value"):
+        MessageParameters({moqt.PARAM_SUBGROUP_FILTER: b"\x00\x01\x64\x00"})
+
+
+def test_message_parameters_rejects_an_unknown_parameter_type() -> None:
+    """
+    未知の型番号のパラメータを拒否することを確認する。
+
+    draft-ietf-moq-transport-21 §9.20 (Control Message Parameters) は既知の型だけを
+    定めるため、未知の型は PROTOCOL_VIOLATION になる。
+    """
+    with pytest.raises(ValueError, match="unknown message parameter type"):
+        MessageParameters({0x3FFF: b"\x01"})
+
+
+def test_message_parameters_reads_a_typed_location_filter() -> None:
+    """
+    LOCATION_FILTER を型付きで読み出せることを確認する。
+
+    wire 形式は Length でフィールド数が決まる optional vi64 群である
+    (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+    """
+    parameters = MessageParameters(
+        {
+            moqt.PARAM_LOCATION_FILTER: LocationFilter(
+                "absolute_range", start_group=5, start_object=9, end_group_delta=2
+            )
+        }
+    )
+
+    assert parameters.location_filter_typed == LocationFilter(
+        "absolute_range", start_group=5, start_object=9, end_group_delta=2
+    )
+    assert parameters.location_filter_typed is not None
+    assert parameters.location_filter_typed.kind == "absolute_range"
+    # `location_filter` は長さプレフィックスを含まないフィルタ本体を返す
+    assert parameters.location_filter == b"\x05\x09\x02"
+    assert LocationFilter.decode(parameters.location_filter) == parameters.location_filter_typed
+    # エンコード済みの辞書の値は長さプレフィックスを含む
+    assert parameters.to_dict()[moqt.PARAM_LOCATION_FILTER] == b"\x03\x05\x09\x02"
+
+
+def test_message_parameters_reports_a_location_filter_update() -> None:
+    """
+    REQUEST_UPDATE の LOCATION_FILTER の 3 状態を区別できることを確認する。
+
+    draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 はフィルタの削除を
+    表し、パラメータの省略 (値の変更なし) と区別する。
+    """
+    unchanged = MessageParameters()
+    removed = MessageParameters({moqt.PARAM_LOCATION_FILTER: b"\x00"})
+    replaced = MessageParameters({moqt.PARAM_LOCATION_FILTER: LocationFilter("next_object")})
+
+    assert unchanged.location_filter_update.kind == "unchanged"
+    assert unchanged.location_filter_update.filter is None
+    assert removed.location_filter_update.kind == "removed"
+    assert removed.location_filter_typed is None
+    assert replaced.location_filter_update.kind == "set"
+    assert replaced.location_filter_update.filter == LocationFilter("next_object")
+
+
+def test_message_parameters_reads_nested_fill_parameters() -> None:
+    """
+    FILL_PARAMETERS の内側のパラメータを型付きで読めることを確認する。
+
+    内側は外側とは別のパラメータスコープである
+    (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))。
+    """
+    parameters = MessageParameters({moqt.PARAM_FILL_PARAMETERS: {moqt.PARAM_FILL_TIMEOUT: 1000}})
+
+    assert parameters.fill_parameters is not None
+    assert parameters.fill_parameters.fill_timeout == 1000
+    assert parameters.fill_parameters.forward is None
+
+
+def test_message_parameters_sets_largest_object() -> None:
+    """LARGEST_OBJECT を設定でき、既存の値が置き換わることを確認する。"""
+    parameters = MessageParameters()
+
+    parameters.set_largest_object(3, 7)
+
+    assert parameters.largest_object == (3, 7)
+    assert len(parameters) == 1
+
+    parameters.set_largest_object(4, 8)
+
+    assert parameters.largest_object == (4, 8)
+    assert len(parameters) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "encoded"),
+    [
+        ("relative_group", {"start_group": 2}, b"\x02"),
+        ("next_object", {}, b"\x00\x00"),
+        ("absolute_start", {"start_group": 5, "start_object": 9}, b"\x05\x09"),
+        (
+            "absolute_range",
+            {"start_group": 5, "start_object": 9, "end_group_delta": 2},
+            b"\x05\x09\x02",
+        ),
+        (
+            "absolute_range_with_end",
+            {"start_group": 5, "start_object": 9, "end_group_delta": 2, "end_object": 4},
+            b"\x05\x09\x02\x04",
+        ),
+    ],
+    ids=[
+        "relative-group",
+        "next-object",
+        "absolute-start",
+        "absolute-range",
+        "absolute-range-with-end",
+    ],
+)
+def test_location_filter_round_trips_through_bytes(
+    kind: str,
+    fields: dict[str, int],
+    encoded: bytes,
+) -> None:
+    """
+    LOCATION_FILTER が wire 形式のバイト列と往復することを確認する。
+
+    フィールド数が値の意味を決める
+    (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+    """
+    location_filter = LocationFilter(kind, **fields)
+
+    assert location_filter.kind == kind
+    assert location_filter.encode() == encoded
+    assert LocationFilter.decode(encoded) == location_filter
+
+
+def test_location_filter_reports_its_fields() -> None:
+    """LOCATION_FILTER が種別ごとのフィールドを返すことを確認する。"""
+    location_filter = LocationFilter(
+        "absolute_range_with_end", start_group=5, start_object=9, end_group_delta=2, end_object=4
+    )
+
+    assert location_filter.start_group == 5
+    assert location_filter.start_object == 9
+    assert location_filter.end_group_delta == 2
+    assert location_filter.end_object == 4
+
+    # 種別が持たないフィールドは `None` になる
+    relative = LocationFilter("relative_group", start_group=2)
+
+    assert relative.start_group == 2
+    assert relative.start_object is None
+    assert relative.end_group_delta is None
+    assert relative.end_object is None
+
+
+def test_location_filter_normalizes_an_absolute_start_of_zero() -> None:
+    """
+    Start が両方 0 の absolute_start が next_object として読み直されることを確認する。
+
+    wire 上は 2 フィールドの 0,0 であり区別できない
+    (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))。
+    """
+    location_filter = LocationFilter("absolute_start", start_group=0, start_object=0)
+
+    assert LocationFilter.decode(location_filter.encode()) == LocationFilter("next_object")
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "expected"),
+    [
+        ("relative_group", {}, "requires start_group"),
+        ("relative_group", {"start_group": 1, "start_object": 2}, "does not take start_object"),
+        ("next_object", {"start_group": 1}, "does not take start_group"),
+        ("absolute_start", {"start_group": 1}, "requires start_object"),
+        ("absolute_range", {"start_group": 1, "start_object": 2}, "requires end_group_delta"),
+        (
+            "absolute_range_with_end",
+            {"start_group": 1, "start_object": 2, "end_group_delta": 3},
+            "requires end_object",
+        ),
+        ("bogus", {}, "unknown LOCATION_FILTER kind"),
+    ],
+    ids=[
+        "relative-group-without-start-group",
+        "relative-group-with-start-object",
+        "next-object-with-start-group",
+        "absolute-start-without-start-object",
+        "absolute-range-without-end-group-delta",
+        "absolute-range-with-end-without-end-object",
+        "unknown-kind",
+    ],
+)
+def test_location_filter_rejects_mismatched_fields(
+    kind: str,
+    fields: dict[str, int],
+    expected: str,
+) -> None:
+    """種別とフィールドの組み合わせが合わない LOCATION_FILTER を拒否することを確認する。"""
+    with pytest.raises(ValueError, match=expected):
+        LocationFilter(kind, **fields)
+
+
+def test_location_filter_rejects_a_malformed_value() -> None:
+    """
+    フィールド数が 5 以上のバイト列を拒否することを確認する。
+
+    (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))
+    """
+    with pytest.raises(ValueError, match="more than 4 fields"):
+        LocationFilter.decode(b"\x01\x01\x01\x01\x01")
 
 
 # ─── セッションの状態 ───────────────────────────────────────
