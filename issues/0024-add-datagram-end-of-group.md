@@ -31,3 +31,13 @@ moqt-py の native と Python 層に同じ引数を通す。
 
 - `Publication.send_datagram` から END_OF_GROUP を指定できること
 - 受信側の `MoqtObject.status` で観測できること
+
+## pending にする理由
+
+moqt-rs の `Session::send_object_datagram` が `end_of_group` を受け取らないため、
+moqt-py だけでは状態機械へ通知できない。
+
+END_OF_GROUP の datagram を送るには、moqt-rs 側で
+`Session::send_object_datagram` に引数を追加し、datagram のフィルタ評価と
+重複 Object 検証へ反映する必要がある。moqt-rs の API が追加された時点で
+この issue を reopened にして対応する。
