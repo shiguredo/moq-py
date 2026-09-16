@@ -1,7 +1,7 @@
 # SETUP オプションを送受信できるようにする
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/add-session-setup-options
 - Polished:
 
@@ -42,3 +42,19 @@ SUBSCRIBE を送信できない。`MAX_REQUEST_UPDATES` / `MAX_AUTH_TOKEN_CACHE_
 - peer が宣言した値と受信した AUTHORIZATION_TOKEN を Python から取得できること
 - `MAX_FILTER_RANGES` を宣言した publisher に対し、Range Filter 付き SUBSCRIBE が送信できること
 - e2e テストで往復を確認できること
+
+## 解決方法
+
+`CoreSession::client` / `CoreSession::server` に `setup_options` 引数を追加し、Setup Option
+Type をキーにした辞書で PATH / AUTHORITY / AUTHORIZATION_TOKEN /
+MAX_AUTH_TOKEN_CACHE_SIZE / MAX_FILTER_RANGES / MAX_REQUEST_UPDATES を送れるようにした。
+偶数型は varint、奇数型はバイト列、AUTHORIZATION_TOKEN は Token の辞書またはそのリストで
+受ける。MOQT_IMPLEMENTATION は `implementation` 引数が担うため指定できない。
+
+受信側は `CoreSession::receive_control` で peer の SETUP を控え、
+`Session.peer_setup_options()` と `moq.moq.Client.peer_setup_options` から参照できるように
+した。あわせて `Message.body["options"]` が全 Setup Option を返すようにした。
+
+`tests/test_moqt.py` の `test_setup_options_are_sent_and_observed` で往復と
+AUTHORIZATION_TOKEN の復元を、`test_range_filter_requires_the_peer_to_declare_max_filter_ranges`
+で MAX_FILTER_RANGES の宣言後に Range Filter 付き SUBSCRIBE が送れることを確認する。
