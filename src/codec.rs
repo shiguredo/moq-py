@@ -46,11 +46,11 @@ pub(crate) struct Message {
 impl Message {
     /// メッセージ種別を表す文字列。
     ///
-    /// `setup` / `goaway` / `subscribe` / `subscribe_ok` / `request_ok` /
-    /// `request_error` / `request_update` / `publish` / `publish_done` /
-    /// `publish_skipped` / `publish_state_notify` / `fetch` / `fetch_ok` /
-    /// `track_status` / `publish_namespace` / `namespace` / `namespace_done` /
-    /// `subscribe_namespace` / `subscribe_tracks` のいずれかである。
+    /// `setup` / `goaway` / `request_ok` / `request_error` / `subscribe` /
+    /// `subscribe_ok` / `request_update` / `publish` / `publish_done` /
+    /// `publish_state_notify` / `fetch` / `fetch_ok` / `track_status` のいずれかである。
+    /// 列挙は `moqt.moqt` が扱う制御メッセージの全体であり、relay 専用の
+    /// namespace 発見・告知機構は含まない。
     #[getter]
     fn kind(&self) -> &'static str {
         self.kind
