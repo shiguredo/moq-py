@@ -1,7 +1,7 @@
 # 送信 subgroup オブジェクトの Properties をフィルタ評価へ渡す
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-subgroup-object-properties-filter
 - Polished:
 
@@ -38,3 +38,13 @@ moqt-rs の `Session::send_subgroup_object` は `properties_bytes` を使って
 
 - OBJECT_PROPERTY_FILTER の条件を満たす Object が送信され、満たさない Object は送信されないこと
 - e2e テストで確認できること
+
+## 解決方法
+
+`moq._runtime.Runtime.send_subgroup_object` が、wire へ書く Properties と同じ
+`Properties Length | Key-Value-Pairs` のバイト列を `CoreSession.send_subgroup_object` へ
+渡すようにした。`_properties_blob` で正規化したバイト列をエンコードと状態機械の評価の
+両方に使う。
+
+`tests/test_e2e.py` の `test_object_property_filter_selects_objects_by_property` で、
+OBJECT_PROPERTY_FILTER を満たすオブジェクトだけが送信されることを確認する。
