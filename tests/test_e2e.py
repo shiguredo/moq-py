@@ -250,8 +250,15 @@ async def test_objects_in_a_second_group_are_delivered(moq_pair: MoqPair) -> Non
 
     received = await _take_objects(subscription, 3)
 
-    assert [(item.group_id, item.object_id) for item in received] == [(1, 0), (1, 1), (2, 0)]
-    assert [item.payload for item in received] == [b"first", b"second", b"third"]
+    # Group 1 と Group 2 は別の subgroup ストリームであり、ストリーム間の到着順は
+    # 保証されない。同じストリーム内の Object の順序だけを Group ごとに検証する。
+    by_group: dict[int, list[tuple[int, bytes]]] = {}
+    for item in received:
+        by_group.setdefault(item.group_id, []).append((item.object_id, item.payload))
+    assert by_group == {
+        1: [(0, b"first"), (1, b"second")],
+        2: [(0, b"third")],
+    }
 
 
 async def test_object_properties_are_delivered(moq_pair: MoqPair) -> None:
