@@ -255,6 +255,48 @@ async def test_object_properties_are_delivered(moq_pair: MoqPair) -> None:
     assert received[0].publisher_priority is None
 
 
+async def test_subgroup_properties_must_be_consistent(moq_pair: MoqPair) -> None:
+    """
+    Subgroup 内で Properties の有無が変わると送信が拒否されることを確認する。
+
+    PROPERTIES bit は Subgroup Header で固定されるため、subgroup 内の全オブジェクトが
+    Properties を持つか、1 つも持たないかのどちらかでなければならない
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        # Track ごとに別の Track Alias を使う
+        published.append(await request.subscribe_ok(len(published) + 1))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+    publication = published[0]
+    # 有無だけが問題なので、順序検証に意味を持たない LOC の TIMESTAMP を使う
+    properties = loc.Properties()
+    properties.add(loc.TIMESTAMP, 1000)
+
+    # Properties ありで開いた subgroup へ Properties 無しのオブジェクトは送れない
+    await publication.send_object(1, 0, b"with-properties", properties_data=properties.encode())
+    with pytest.raises(MoqtError, match="must be consistent within a subgroup"):
+        await publication.send_object(1, 1, b"without-properties")
+    # 先に拒否されたオブジェクトは送られていないため、届くのは 1 件だけである
+    received = await _take_objects(subscription, 1)
+    assert received[0].payload == b"with-properties"
+
+    # Properties 無しで開いた subgroup へ Properties ありのオブジェクトは送れない。
+    # 同じ subscription では Properties の有無が固定されるため、別の Track を使う
+    await moq_pair.client.subscribe(NAMESPACE, b"audio")
+    await wait_until(lambda: len(published) == 2)
+    await published[1].send_object(1, 0, b"without-properties")
+    with pytest.raises(MoqtError, match="must be consistent within a subgroup"):
+        await published[1].send_object(
+            1, 1, b"with-properties", properties_data=properties.encode()
+        )
+
+
 async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> None:
     """
     データグラムで送った Object Properties が受信側で参照できることを確認する。

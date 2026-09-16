@@ -802,18 +802,21 @@ class Runtime:
         同じ Request ID と Group ID のストリームが既にあれば再利用する。
         Object ID はストリーム内で差分として表現されるため、直前の値との差を書く。
 
-        `properties_data` を渡す場合、そのストリームの最初のオブジェクトで
-        Properties の有無がヘッダに固定される
-        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。ヘッダが Properties を
-        持たないストリームへ途中から渡すと `MoqtError` になる。
+        `properties_data` の有無は、そのストリームの最初のオブジェクトでヘッダの
+        PROPERTIES bit に固定される
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。以降のオブジェクトの
+        Properties の有無がヘッダと食い違うと `MoqtError` になる。
         """
         # 状態を進める前にバイト列を組み立て、不正な組み合わせでは送信も状態更新もしない
         writer = self._subgroups.get(request_id)
         opens_stream = writer is None or writer.group_id != group_id
-        if properties_data is not None and not opens_stream and not writer.has_properties:
+        # ヘッダの PROPERTIES bit は subgroup 内の全オブジェクトで一貫していなければ
+        # ならない。食い違うオブジェクトを書くとヘッダと矛盾した wire になる
+        if not opens_stream and writer.has_properties != (properties_data is not None):
+            expected = "with" if writer.has_properties else "without"
             raise MoqtError(
-                f"stream for request {request_id} carries objects without properties; "
-                "properties must be set on the first object of a subgroup"
+                f"stream for request {request_id} carries objects {expected} properties; "
+                "properties must be consistent within a subgroup"
             )
         delta = (
             object_id
