@@ -138,7 +138,6 @@ await publication.send_datagram(1, 0, b"datagram payload")
 >
 > - データグラムは経路 MTU を超えると通知なく破棄され、送信側からは検知できません (draft-ietf-moq-transport-21 §11.2.1)。`moqt.moqt.MAX_DATAGRAM_SIZE` を超えるデータグラムを送ると警告を記録します。大きいオブジェクトは subgroup ストリームで送ってください
 > - 中継 (relay) は含みません
-> - FETCH の fill (FILL_PARAMETERS による過去のオブジェクトの補充) は未対応です
 
 ### moqt.moq.testing
 
