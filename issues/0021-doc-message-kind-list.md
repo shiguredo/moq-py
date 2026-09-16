@@ -1,7 +1,7 @@
 # Message.kind の doc から削除済みメッセージを除去する
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-message-kind-doc
 - Polished:
 
@@ -38,3 +38,13 @@ doc の列挙を `message_kind` が実際に返す 13 種に合わせる。列�
 
 - `Message::kind` の doc に削除済みメッセージが残っていないこと
 - 型スタブを再生成しても同じ内容になること
+
+## 解決方法
+
+`src/codec.rs` の `Message::kind` の doc が列挙するメッセージ種別を、`message_kind` が
+実際に返す 13 種へ揃えた。relay 専用の namespace 発見・告知機構に対応する 6 種
+(`publish_skipped` / `publish_namespace` / `namespace` / `namespace_done` /
+`subscribe_namespace` / `subscribe_tracks`) を削除し、列挙が制御メッセージの全体で
+あることを doc に明記した。
+
+生成物である `python/moqt/_native.pyi` も再生成し、同じ内容になることを確認した。
