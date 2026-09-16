@@ -1,7 +1,7 @@
 # PROPERTIES bit と一致しない subgroup オブジェクトの送出を拒否する
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-subgroup-properties-bit-mismatch
 - Polished:
 
@@ -31,3 +31,12 @@ Subgroup ストリームの送信状態を保持する `FetchWriter` / Subgroup 
 - Properties 無しの subgroup で Properties 付きのオブジェクトを送ろうとするとエラーになること
 - どちらの場合も wire にバイト列が書かれないこと
 - テストで確認できること
+
+## 解決方法
+
+`moq._runtime.Runtime.send_subgroup_object` で、subgroup ヘッダの PROPERTIES bit と
+そのオブジェクトの Properties の有無が食い違う場合を双方向で拒否するようにした。
+
+`tests/test_e2e.py` の `test_subgroup_properties_must_be_consistent` で、Properties ありで
+開いた subgroup への Properties 無しオブジェクトと、その逆の組み合わせが `MoqtError` に
+なることを確認する。
