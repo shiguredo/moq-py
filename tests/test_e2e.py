@@ -87,6 +87,11 @@ async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
     return await collect_objects(fetch.objects(), count, OBJECT_TIMEOUT)
 
 
+async def _take_fetch_ranges(fetch: Fetch, count: int) -> list[tuple[str, int, int]]:
+    """fetch から指定件数の End of Range を取り出す。"""
+    return await collect_objects(fetch.ranges(), count, OBJECT_TIMEOUT)
+
+
 def _range_filter(
     set_id: int,
     start: int,
@@ -1258,6 +1263,85 @@ async def test_fetch_responds_in_a_descending_group_order(moq_pair: MoqPair) -> 
         await responses[0].send_object(9, 0, b"ascending")
 
     await responses[0].close()
+
+
+async def test_fetch_response_reports_end_of_range(moq_pair: MoqPair) -> None:
+    """
+    FETCH 応答の End of Range 3 種が peer の `Fetch.ranges()` で観測されることを確認する。
+
+    End of Range は要求された範囲にオブジェクトが無い場合や不明な場合に送る。
+    種類は Serialization Flags の特殊値で表し、Group ID と Object ID を絶対値で運ぶ
+    (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7 /
+    §11.4.1.2 (End of Range))。
+    """
+
+    async def on_fetch(request: FetchRequest) -> None:
+        response = await request.respond((0, 0), end_of_track=False)
+        await response.send_end_of_non_existent_range(3, 7)
+        # End of Range の後は Group ID と Object ID の基準が End of Range の値になる
+        await response.send_object(4, 0, b"after-end-of-range")
+        await response.send_end_of_unknown_range(5, 1)
+        await response.send_end_of_timed_out_range(6, 2)
+        await response.close()
+
+    moq_pair.server.on_fetch(on_fetch)
+
+    fetch = await moq_pair.client.fetch(NAMESPACE, TRACK_NAME)
+    ranges = await _take_fetch_ranges(fetch, 3)
+    objects = await _take_fetch_objects(fetch, 1)
+
+    assert ranges == [
+        ("end_of_non_existent_range", 3, 7),
+        ("end_of_unknown_range", 5, 1),
+        ("end_of_timed_out_range", 6, 2),
+    ]
+    assert [(item.group_id, item.object_id, item.payload) for item in objects] == [
+        (4, 0, b"after-end-of-range")
+    ]
+
+
+async def test_fetch_response_carries_properties_and_datagram_origin(
+    moq_pair: MoqPair,
+) -> None:
+    """
+    properties 付きの fetch オブジェクトと datagram 起源のオブジェクトを送れることを確認する。
+
+    Properties は Object Properties の生バイト列であり、フラグの bit 5 を立てて
+    Publisher Priority の後ろに置く。datagram 起源のオブジェクトはフラグの bit 6 を
+    立て、Subgroup ID を wire に載せない
+    (draft-ietf-moq-transport-21 §11.4.1.1 (Flags) / §11.1.3 (Object Properties))。
+    """
+    properties = moqt.ObjectProperties()
+    properties.add(moqt.PROP_PRIOR_GROUP_ID_GAP, 2)
+
+    async def on_fetch(request: FetchRequest) -> None:
+        response = await request.respond((0, 0), end_of_track=False)
+        # PRIOR_GROUP_ID_GAP は現在の Group ID を超えられないため、Group 9 から始める
+        await response.send_object(9, 0, b"with-properties", properties_data=properties.encode())
+        # 同じ Group / Subgroup で Publisher Priority を変える。datagram 起源の
+        # オブジェクトは Subgroup 単位の Priority 一貫性検査の対象外であり、
+        # bit 6 が立っていなければ受信側がプロトコル違反として拒否する
+        # (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))
+        await response.send_object(
+            9, 1, b"datagram-origin", publisher_priority=200, datagram_origin=True
+        )
+        await response.close()
+
+    moq_pair.server.on_fetch(on_fetch)
+
+    fetch = await moq_pair.client.fetch(NAMESPACE, TRACK_NAME)
+    received = await _take_fetch_objects(fetch, 2)
+
+    assert [item.payload for item in received] == [b"with-properties", b"datagram-origin"]
+    assert [(item.group_id, item.object_id) for item in received] == [(9, 0), (9, 1)]
+    # datagram 起源のオブジェクトは Subgroup ID を運ばないため 0 として解決される
+    assert [item.subgroup_id for item in received] == [0, 0]
+    assert [item.publisher_priority for item in received] == [128, 200]
+
+    # moqt-rs の FetchStreamDecoder は受信した fetch オブジェクトの Properties を
+    # 公開しないため、現状では `MoqtObject.properties` には載らない。Properties 自体は
+    # peer のデコーダが読み取り、宣言長の不一致や Malformed Track を検出する
+    assert received[0].properties is None
 
 
 def test_low_level_names_are_exported_from_the_package_root() -> None:

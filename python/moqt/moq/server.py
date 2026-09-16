@@ -269,8 +269,24 @@ class FetchResponse:
         *,
         publisher_priority: int = 128,
         subgroup_id: int = 0,
+        properties_data: bytes | None = None,
+        datagram_origin: bool = False,
     ) -> None:
-        """fetch stream へオブジェクトを書き込む。"""
+        """fetch stream へオブジェクトを書き込む。
+
+        オブジェクトは `GROUP_ORDER` で要求された向きの順に送る。逆向きの Group を
+        送ろうとすると `MoqtError` になる
+        (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+
+        `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
+        `Properties Length` を含む生バイト列であり、宣言長と実データ長が一致しない
+        場合は `MoqtError` になる
+        (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+
+        `datagram_origin` を真にすると、もともとデータグラムで届いたオブジェクトで
+        あることを示す。この場合 Subgroup ID は wire に載らず、受信側では 0 として
+        解決される (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。
+        """
         await self.runtime.send_fetch_stream_object(
             self.stream_id,
             group_id,
@@ -278,6 +294,38 @@ class FetchResponse:
             payload,
             publisher_priority=publisher_priority,
             subgroup_id=subgroup_id,
+            properties_data=properties_data,
+            datagram_origin=datagram_origin,
+        )
+
+    async def send_end_of_non_existent_range(self, group_id: int, object_id: int) -> None:
+        """要求された範囲にオブジェクトが存在しないことを通知する。
+
+        `group_id` と `object_id` は存在しない範囲の終端である。
+        (draft-ietf-moq-transport-21 §11.4.1.2 (End of Range))
+        """
+        await self.runtime.send_fetch_end_of_range(
+            self.stream_id, "end_of_non_existent_range", group_id, object_id
+        )
+
+    async def send_end_of_unknown_range(self, group_id: int, object_id: int) -> None:
+        """要求された範囲のオブジェクトが不明であることを通知する。
+
+        `group_id` と `object_id` は不明な範囲の終端である。
+        (draft-ietf-moq-transport-21 §11.4.1.2 (End of Range))
+        """
+        await self.runtime.send_fetch_end_of_range(
+            self.stream_id, "end_of_unknown_range", group_id, object_id
+        )
+
+    async def send_end_of_timed_out_range(self, group_id: int, object_id: int) -> None:
+        """要求された範囲のオブジェクトが期限切れで取得できなかったことを通知する。
+
+        `group_id` と `object_id` は期限切れの範囲の終端である。
+        (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7)
+        """
+        await self.runtime.send_fetch_end_of_range(
+            self.stream_id, "end_of_timed_out_range", group_id, object_id
         )
 
     async def close(self) -> None:

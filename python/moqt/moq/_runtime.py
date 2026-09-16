@@ -168,6 +168,15 @@ SUBGROUP_ID_MODE_EXPLICIT = "explicit"
 GROUP_ORDER_ASCENDING = 0x01
 GROUP_ORDER_DESCENDING = 0x02
 
+# fetch stream の End of Range の種別と Serialization Flags の特殊値
+# (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7)。
+# 値は `Fetch.ranges()` が返す種別と同じ文字列であり、送信と受信で対称になる。
+_FETCH_END_OF_RANGE_FLAGS: dict[str, int] = {
+    "end_of_non_existent_range": 0x8C,
+    "end_of_unknown_range": 0x10C,
+    "end_of_timed_out_range": 0x20C,
+}
+
 # ストリームの種別
 _STREAM_CONTROL = "control"
 _STREAM_REQUEST = "request"
@@ -832,11 +841,17 @@ class Runtime:
         *,
         publisher_priority: int = 128,
         subgroup_id: int = 0,
+        properties_data: bytes | None = None,
+        datagram_origin: bool = False,
     ) -> None:
         """開いた fetch stream へオブジェクトを書き込む。"""
         writer = self._fetch_streams.get(stream_id)
         if writer is None:
             raise MoqtError(f"fetch stream {stream_id} is not open")
+        # 状態機械へ通知する前にバイト列を組み立て、不正な組み合わせでは送信しない。
+        # 宣言長と実データ長が一致しない Properties もここで拒否する
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        properties_bytes = None if properties_data is None else _properties_blob(properties_data)
         data = _encode_fetch_object(
             writer,
             group_id,
@@ -844,6 +859,8 @@ class Runtime:
             payload,
             publisher_priority,
             subgroup_id,
+            properties_bytes=properties_bytes,
+            datagram_origin=datagram_origin,
         )
         await self._apply_events(self._core.send_fetch_object(stream_id))
         await self._ops.send_stream_data(stream_id, data, False)
@@ -851,6 +868,30 @@ class Runtime:
         writer.last_object_id = object_id
         writer.last_subgroup_id = subgroup_id
         writer.last_publisher_priority = publisher_priority
+
+    async def send_fetch_end_of_range(
+        self,
+        stream_id: int,
+        kind: str,
+        group_id: int,
+        object_id: int,
+    ) -> None:
+        """開いた fetch stream へ End of Range を書き込む。
+
+        `kind` は `end_of_non_existent_range` / `end_of_unknown_range` /
+        `end_of_timed_out_range` のいずれかである
+        (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7)。
+        """
+        writer = self._fetch_streams.get(stream_id)
+        if writer is None:
+            raise MoqtError(f"fetch stream {stream_id} is not open")
+        data = _encode_fetch_end_of_range(kind, group_id, object_id)
+        await self._apply_events(self._core.send_fetch_object(stream_id))
+        await self._ops.send_stream_data(stream_id, data, False)
+        # End of Range の後は Group ID と Object ID の基準が End of Range の値になる
+        # (draft-ietf-moq-transport-21 §11.4.1.2 (End of Range))。
+        writer.last_group_id = group_id
+        writer.last_object_id = object_id
 
     async def close_fetch_stream(self, stream_id: int) -> None:
         """fetch stream を終了する。"""
@@ -1700,6 +1741,9 @@ def _encode_fetch_object(
     payload: bytes,
     publisher_priority: int,
     subgroup_id: int,
+    *,
+    properties_bytes: bytes | None = None,
+    datagram_origin: bool = False,
 ) -> bytes:
     """fetch stream のオブジェクトをエンコードする
     (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。
@@ -1716,27 +1760,39 @@ def _encode_fetch_object(
     `今回 - 前回 - 1`、Descending では `前回 - 今回 - 1` を書く。要求と逆向きの
     Group は peer が解決できないので拒否する
     (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
-    この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+
+    `properties_bytes` は `Properties Length | Key-Value-Pairs` の形である。
+    `datagram_origin` を真にすると、Subgroup ID を運ばないことを示す bit を立てて
+    Subgroup ID フィールドを書かない
+    (draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Datagram 起源のオブジェクトは
+    Subgroup ID を持たない)。この節番号・規則は draft 由来であり将来の改訂で
+    変更されうる。
     """
-    flags = 0x03  # Subgroup ID: Explicit
+    # Datagram 起源のオブジェクトは Subgroup ID を運ばず、下位 2 bit は無視される
+    flags = 0x00 if datagram_origin else 0x03  # Subgroup ID: Explicit
+    if datagram_origin:
+        flags |= 0x40
+    if properties_bytes is not None:
+        flags |= 0x20
+    subgroup_field = b"" if datagram_origin else moqt.encode_varint(subgroup_id)
     fields = bytearray()
     if writer.last_group_id is None or writer.last_object_id is None:
         flags |= 0x08  # Group ID Delta あり (先頭は絶対値)
         flags |= 0x04  # Object ID Delta あり (Group 変更時は絶対値)
         fields += moqt.encode_varint(group_id)
-        fields += moqt.encode_varint(subgroup_id)
+        fields += subgroup_field
         fields += moqt.encode_varint(object_id)
     elif group_id != writer.last_group_id:
         flags |= 0x08
         flags |= 0x04
         delta = _fetch_group_id_delta(writer.group_order, writer.last_group_id, group_id)
         fields += moqt.encode_varint(delta)
-        fields += moqt.encode_varint(subgroup_id)
+        fields += subgroup_field
         fields += moqt.encode_varint(object_id)
     else:
         # Group ID を省略すると直前の Group ID を継承する
         flags |= 0x04
-        fields += moqt.encode_varint(subgroup_id)
+        fields += subgroup_field
         fields += moqt.encode_varint(object_id - writer.last_object_id)
 
     flags |= 0x10  # Publisher Priority
@@ -1744,9 +1800,30 @@ def _encode_fetch_object(
     body += moqt.encode_varint(flags)
     body += fields
     body.append(publisher_priority)
+    if properties_bytes is not None:
+        body += properties_bytes
     body += moqt.encode_varint(len(payload))
     body += payload
     return bytes(body)
+
+
+def _encode_fetch_end_of_range(kind: str, group_id: int, object_id: int) -> bytes:
+    """fetch stream の End of Range エントリをエンコードする。
+
+    End of Range は Serialization Flags の特殊値で表し、Group ID と Object ID を
+    絶対値で運ぶ。Subgroup ID / Publisher Priority / Properties は持たない
+    (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7 /
+    §11.4.1.2 (End of Range))。この節番号・規則は draft 由来であり将来の改訂で
+    変更されうる。
+    """
+    flags = _FETCH_END_OF_RANGE_FLAGS.get(kind)
+    if flags is None:
+        raise MoqtError(f"unknown end of range kind: {kind}")
+    data = bytearray()
+    data += moqt.encode_varint(flags)
+    data += moqt.encode_varint(group_id)
+    data += moqt.encode_varint(object_id)
+    return bytes(data)
 
 
 def _fetch_group_id_delta(group_order: int, previous_group_id: int, group_id: int) -> int:
