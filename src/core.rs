@@ -1056,16 +1056,10 @@ impl CoreEvent {
 
     /// 受信したオブジェクトを表すイベントを作る。
     ///
-    /// `request_id` はストリームを所有する subscription / fetch の Request ID である。
-    /// どの subscription のオブジェクトかを Python 側が判別するために使う。
-    /// 受信したオブジェクトを表すイベントを作る。
-    ///
-    /// `request_id` はストリームを所有する subscription / fetch の Request ID である。
-    /// どの subscription のオブジェクトかを Python 側が判別するために使う。
-    ///
     /// `parts` の `properties` はデータグラムと subgroup で同じ形にする。
-    /// `publisher_priority` と `subgroup_id` はデータストリームのヘッダが運ぶ値であり、
-    /// データグラムでは `None` になる。
+    /// `publisher_priority` はデータグラムでは DEFAULT_PRIORITY bit が立っている場合だけ
+    /// `None` になり、`subgroup_id` はデータグラムでは常に `None` になる
+    /// (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
     fn object(stream_id: Option<u64>, parts: ObjectEventParts) -> Self {
         Self {
             stream_id,
@@ -2298,9 +2292,12 @@ impl CoreSession {
                             group_id: Some(datagram.group_id),
                             status: datagram.status,
                             properties: datagram.properties_data.clone(),
-                            // データグラムは subgroup ヘッダを持たないため、
-                            // Publisher Priority と Subgroup ID は入らない
-                            publisher_priority: None,
+                            // データグラムは subgroup ヘッダを持たないため Subgroup ID は入らない。
+                            // Publisher Priority は Type Flags の DEFAULT_PRIORITY bit が
+                            // 立っていれば `None`、立っていなければ明示値が入る
+                            // (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+                            // draft 由来の値であり、将来の改訂で変更される可能性がある
+                            publisher_priority: datagram.publisher_priority,
                             subgroup_id: None,
                         },
                     ),

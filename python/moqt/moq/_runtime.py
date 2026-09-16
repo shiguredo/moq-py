@@ -99,7 +99,7 @@ class NativeEvent(Protocol):
 
     @property
     def publisher_priority(self) -> int | None:
-        """データストリームが運ぶ Publisher Priority。"""
+        """データストリームまたはデータグラムが運ぶ Publisher Priority。"""
         ...
 
     @property

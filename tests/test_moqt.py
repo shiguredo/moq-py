@@ -101,6 +101,38 @@ def _fetch_round_trip(client: Session, server: Session, stream_id: int) -> int:
     return request_id
 
 
+def _object_datagram(
+    track_alias: int,
+    group_id: int,
+    object_id: int,
+    payload: bytes,
+    publisher_priority: int | None,
+) -> bytes:
+    """OBJECT_DATAGRAM のバイト列を組み立てる。
+
+    Type Flags の並びは Type Flags (vi64)、Track Alias (vi64)、Group ID (vi64)、
+    Object ID (vi64)、Publisher Priority (8 bits、省略可能)、Payload である。
+    Object ID が 0 の場合は ZERO_OBJECT_ID bit を立てて Object ID を省略し、
+    Publisher Priority が `None` の場合は DEFAULT_PRIORITY bit を立てて省略する
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    """
+    type_byte = 0x00
+    if object_id == 0:
+        type_byte |= 0x04
+    if publisher_priority is None:
+        type_byte |= 0x08
+    data = bytearray()
+    data += encode_varint(type_byte)
+    data += encode_varint(track_alias)
+    data += encode_varint(group_id)
+    if object_id != 0:
+        data += encode_varint(object_id)
+    if publisher_priority is not None:
+        data.append(publisher_priority)
+    data += payload
+    return bytes(data)
+
+
 def test_request_stream_close_is_reported_for_a_local_request() -> None:
     """
     自側が開始した request stream の終端がセッションへ通知されることを確認する。
@@ -1493,6 +1525,36 @@ def test_grease_generate_uses_the_standard_random_by_default() -> None:
 
 
 # ─── セッション状態の照会 ───────────────────────────────────
+
+
+def test_received_datagram_reports_the_publisher_priority() -> None:
+    """受信したデータグラムの Publisher Priority がイベントに載ることを確認する。
+
+    DEFAULT_PRIORITY bit が立っていないデータグラムは優先度を明示しており、その値が
+    イベントに入る。bit が立っているデータグラムは購読を確立した制御メッセージの
+    優先度を継承するため `None` になる
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    # 優先度 10 を明示したデータグラム
+    events = client.receive_datagram(_object_datagram(1, 1, 0, b"explicit", 10))
+    objects = [event for event in events if event.kind == "object"]
+    assert len(objects) == 1
+    assert objects[0].publisher_priority == 10
+    assert objects[0].group_id == 1
+    assert objects[0].object_id == 0
+    assert objects[0].track_alias == 1
+    # データグラムは subgroup ヘッダを持たない
+    assert objects[0].subgroup_id is None
+    assert objects[0].stream_id is None
+
+    # DEFAULT_PRIORITY bit が立っているデータグラム
+    events = client.receive_datagram(_object_datagram(1, 1, 1, b"default", None))
+    objects = [event for event in events if event.kind == "object"]
+    assert len(objects) == 1
+    assert objects[0].publisher_priority is None
 
 
 def test_session_state_accessors_report_peer_declared_values() -> None:

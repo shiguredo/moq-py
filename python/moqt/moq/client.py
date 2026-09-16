@@ -79,11 +79,13 @@ class MoqtObject:
     """
 
     publisher_priority: int | None = None
-    """データストリームが運ぶ Publisher Priority。
+    """データストリームまたはデータグラムが運ぶ Publisher Priority。
 
-    `None` は DEFAULT_PRIORITY bit が立ち、購読の優先度を継承することを示す。
-    データグラムでは常に `None` になる。
-    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+    `None` は DEFAULT_PRIORITY bit が立ち、購読を確立した制御メッセージで指定された
+    優先度を継承することを示す。データグラムは明示的な優先度を持つ場合だけ値が入り、
+    DEFAULT_PRIORITY bit が立っている場合は `None` になる。
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram) /
+    §11.3.1 (Subgroup Header))
     """
 
     subgroup_id: int | None = None

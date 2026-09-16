@@ -331,8 +331,10 @@ async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> No
     """
     データグラムで送った Object Properties が受信側で参照できることを確認する。
 
-    データグラムは subgroup ヘッダを持たないため、`subgroup_id` と
-    `publisher_priority` は `None` のままになる。
+    データグラムは subgroup ヘッダを持たないため `subgroup_id` は `None` のままである。
+    Publisher Priority を指定していないため DEFAULT_PRIORITY bit が立ち、
+    `publisher_priority` も `None` になる
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
     """
     published: list[Publication] = []
 
@@ -354,10 +356,45 @@ async def test_datagram_object_properties_are_delivered(moq_pair: MoqPair) -> No
     assert received[0].payload == b"datagram"
     assert received[0].stream_id is None
     assert received[0].subgroup_id is None
+    assert received[0].publisher_priority is None
     assert received[0].properties is not None
     decoded, _consumed = moqt.ObjectProperties.decode(received[0].properties)
     assert decoded.prior_group_id_gap == 2
     assert decoded.object_delivery_timeout == 1000
+
+
+async def test_datagram_publisher_priority_is_delivered(moq_pair: MoqPair) -> None:
+    """
+    データグラムが運ぶ Publisher Priority が受信側で参照できることを確認する。
+
+    DEFAULT_PRIORITY bit が立っていないデータグラムは Publisher Priority を明示して
+    おり、その値が `MoqtObject.publisher_priority` に入る。bit が立っている
+    データグラムは購読を確立した制御メッセージの優先度を継承するため `None` になる
+    (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 優先度を明示したデータグラムは値がそのまま届く
+    await published[0].send_datagram(1, 0, b"explicit", publisher_priority=10)
+    explicit = await _take_objects(subscription, 1)
+
+    assert explicit[0].payload == b"explicit"
+    assert explicit[0].publisher_priority == 10
+
+    # 優先度を省略したデータグラムは DEFAULT_PRIORITY bit が立ち、値を持たない
+    await published[0].send_datagram(1, 1, b"default")
+    default = await _take_objects(subscription, 1)
+
+    assert default[0].payload == b"default"
+    assert default[0].publisher_priority is None
 
 
 async def test_client_publish_and_object_delivery(moq_pair: MoqPair) -> None:

@@ -88,6 +88,11 @@ class Publication:
     ) -> None:
         """オブジェクトデータグラムを送信する。
 
+        `publisher_priority` を省略すると DEFAULT_PRIORITY bit が立ち、購読を確立した
+        制御メッセージで指定された優先度を継承する。受信側では
+        `MoqtObject.publisher_priority` が `None` になる
+        (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+
         `status` の扱いは `send_object` と同じである。
 
         データグラムの合計サイズが `moqt.moqt.MAX_DATAGRAM_SIZE` を超える場合は警告を
