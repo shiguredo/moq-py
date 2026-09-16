@@ -864,9 +864,20 @@ class Runtime:
             self._core.send_publish_done_for_subscription(request_id, status_code, reason)
         )
 
-    async def send_goaway(self, timeout: int = 0) -> None:
-        """GOAWAY を送信する。"""
-        await self._apply_events(self._core.send_goaway(b"", timeout))
+    async def send_goaway(self, timeout: int = 0, new_session_uri: bytes = b"") -> None:
+        """GOAWAY を送信する。
+
+        `new_session_uri` は移行先のセッション URI である。Server はこれで移行先を
+        通知でき、Client は空の URI しか送れない。`MAX_NEW_SESSION_URI_LENGTH` を
+        超える値は送信せずに `MoqtError` にする
+        (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+        """
+        if len(new_session_uri) > moqt.MAX_NEW_SESSION_URI_LENGTH:
+            raise MoqtError(
+                f"new_session_uri must be at most {moqt.MAX_NEW_SESSION_URI_LENGTH} bytes: "
+                f"got {len(new_session_uri)} bytes"
+            )
+        await self._apply_events(self._core.send_goaway(new_session_uri, timeout))
 
     async def stop_sending(self, request_id: int) -> None:
         """subscription を終了する (subscriber 側の STOP_SENDING)。"""

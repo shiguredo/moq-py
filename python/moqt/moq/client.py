@@ -629,10 +629,16 @@ class Client:
             parameters=dict(event.parameters or {}),
         )
 
-    async def goaway(self, timeout: int = 0) -> None:
-        """GOAWAY を送信してセッションの終了を予告する。"""
+    async def goaway(self, timeout: int = 0, new_session_uri: bytes = b"") -> None:
+        """GOAWAY を送信してセッションの終了を予告する。
+
+        `new_session_uri` は移行先のセッション URI である。URI を通知できるのは
+        Server だけであり、Client は空の URI しか送れない。
+        `MAX_NEW_SESSION_URI_LENGTH` を超える値は送信せずに `MoqtError` になる
+        (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+        """
         runtime = self._require_runtime()
-        await runtime.send_goaway(timeout)
+        await runtime.send_goaway(timeout, new_session_uri)
 
     # ─── 内部 ───────────────────────────────────────────────
 

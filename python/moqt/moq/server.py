@@ -44,14 +44,18 @@ class ServerSession:
     runtime: Runtime
     """この session のランタイム。"""
 
-    async def goaway(self, timeout: int = 0) -> None:
+    async def goaway(self, timeout: int = 0, new_session_uri: bytes = b"") -> None:
         """GOAWAY を送り、セッションの終了を予告する。
 
         `timeout` は peer が残りの request を終えるまで待つ猶予時間 (ms) である。
-        GOAWAY の送信後、peer は新しい request を開始しない
+        GOAWAY の送信後、peer は新しい request を開始しない。
+
+        `new_session_uri` は移行先のセッション URI である。Server はこれで移行先を
+        通知でき、Client は空の URI しか送れない。`MAX_NEW_SESSION_URI_LENGTH` を
+        超える値は送信せずに `MoqtError` になる
         (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
         """
-        await self.runtime.send_goaway(timeout)
+        await self.runtime.send_goaway(timeout, new_session_uri)
 
     @property
     def peer_max_auth_token_cache_size(self) -> int:

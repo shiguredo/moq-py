@@ -542,6 +542,66 @@ async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> Non
     assert moq_pair.client.peer_goaway is not None
 
 
+async def test_server_goaway_carries_a_new_session_uri(moq_pair: MoqPair) -> None:
+    """
+    server の GOAWAY が移行先のセッション URI を運ぶことを確認する。
+
+    セッションを閉じる側は `new_session_uri` で移行先を通知でき、受け取った側は
+    `Client.peer_goaway` から URI を復元する
+    (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+    """
+    received: list[PeerGoaway] = []
+
+    async def on_goaway(info: PeerGoaway) -> None:
+        received.append(info)
+
+    moq_pair.client.on_goaway(on_goaway)
+    uri = b"https://example.com/webtransport"
+    await moq_pair.session.goaway(timeout=5000, new_session_uri=uri)
+
+    await wait_until(lambda: bool(received))
+    assert received[0].new_session_uri == uri
+    assert received[0].timeout == 5000
+    peer_goaway = moq_pair.client.peer_goaway
+    assert peer_goaway is not None
+    assert peer_goaway.new_session_uri == uri
+
+
+async def test_goaway_rejects_a_new_session_uri_beyond_the_length_limit(
+    moq_pair: MoqPair,
+) -> None:
+    """
+    長さ上限を超える new session URI を GOAWAY が送信前に拒否することを確認する。
+
+    上限は `MAX_NEW_SESSION_URI_LENGTH` であり、上限ちょうどの URI は送信できる
+    (draft-ietf-moq-transport-21 §9.2 (GOAWAY))。
+    """
+    received: list[PeerGoaway] = []
+
+    async def on_goaway(info: PeerGoaway) -> None:
+        received.append(info)
+
+    moq_pair.client.on_goaway(on_goaway)
+    too_long = b"a" * (moqt.MAX_NEW_SESSION_URI_LENGTH + 1)
+
+    # server からも client からも拒否される
+    with pytest.raises(MoqtError, match="new_session_uri"):
+        await moq_pair.session.goaway(timeout=0, new_session_uri=too_long)
+    with pytest.raises(MoqtError, match="new_session_uri"):
+        await moq_pair.client.goaway(timeout=0, new_session_uri=too_long)
+
+    # 拒否された GOAWAY は送信されていない
+    assert moq_pair.client.peer_goaway is None
+    assert moq_pair.client.established is True
+
+    # 上限ちょうどの URI は送信でき、そのまま相手へ届く
+    uri = b"a" * moqt.MAX_NEW_SESSION_URI_LENGTH
+    await moq_pair.session.goaway(timeout=0, new_session_uri=uri)
+
+    await wait_until(lambda: bool(received))
+    assert received[0].new_session_uri == uri
+
+
 async def test_request_update_is_accepted_by_the_peer(moq_pair: MoqPair) -> None:
     """
     REQUEST_UPDATE に peer が REQUEST_OK で応答することを確認する。
