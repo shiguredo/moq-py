@@ -162,6 +162,12 @@ SUBGROUP_ID_MODE_ZERO = "zero"
 SUBGROUP_ID_MODE_FIRST_OBJECT_ID = "first_object_id"
 SUBGROUP_ID_MODE_EXPLICIT = "explicit"
 
+# GROUP_ORDER パラメータの値 (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+# FETCH 応答の Group ID は差分で表現され、その解決方向がこの値で決まる。省略された
+# 要求では Ascending になる (draft-ietf-moq-transport-21 §10.5 (DEFAULT PUBLISHER GROUP ORDER))。
+GROUP_ORDER_ASCENDING = 0x01
+GROUP_ORDER_DESCENDING = 0x02
+
 # ストリームの種別
 _STREAM_CONTROL = "control"
 _STREAM_REQUEST = "request"
@@ -304,6 +310,13 @@ class FetchWriter:
     """
 
     stream_id: int
+    group_order: int = GROUP_ORDER_ASCENDING
+    """要求された GROUP_ORDER。
+
+    Group ID の差分の解決方向を決める。ストリームごとに解決した値を保持し、
+    同じ fetch stream 内では変えない
+    (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    """
     last_group_id: int | None = None
     last_object_id: int | None = None
     last_subgroup_id: int | None = None
@@ -764,7 +777,10 @@ class Runtime:
         await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
-        self._fetch_streams[stream_id] = FetchWriter(stream_id=stream_id)
+        self._fetch_streams[stream_id] = FetchWriter(
+            stream_id=stream_id,
+            group_order=self._resolve_group_order(request_id),
+        )
         return stream_id
 
     async def open_fill_fetch_stream(self, request_id: int) -> int:
@@ -784,8 +800,28 @@ class Runtime:
         await self._ops.send_stream_data(stream_id, _encode_fetch_header(request_id), False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
-        self._fetch_streams[stream_id] = FetchWriter(stream_id=stream_id)
+        self._fetch_streams[stream_id] = FetchWriter(
+            stream_id=stream_id,
+            group_order=self._resolve_group_order(request_id),
+        )
         return stream_id
+
+    def _resolve_group_order(self, request_id: int) -> int:
+        """送信する fetch stream の GROUP_ORDER を状態機械から解決する。
+
+        `GROUP_ORDER` は FETCH と SUBSCRIBE が運ぶ。fill fetch stream は fetch では
+        なく subscription に紐づくため、fetch を保持していない場合は subscription の
+        値を使う。どちらも省略していれば既定値の Ascending になる
+        (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter) /
+        §10.5 (DEFAULT PUBLISHER GROUP ORDER))。
+        """
+        entry = self._core.fetch(request_id)
+        if entry is None:
+            entry = self._core.subscription(request_id)
+        order = None if entry is None else entry.get("group_order")
+        if order == GROUP_ORDER_DESCENDING:
+            return GROUP_ORDER_DESCENDING
+        return GROUP_ORDER_ASCENDING
 
     async def send_fetch_stream_object(
         self,
@@ -1671,10 +1707,16 @@ def _encode_fetch_object(
     Group ID と Object ID の表現は直前のオブジェクトに依存する。
 
     - 先頭のオブジェクト: どちらも絶対値
-    - Group が変わるとき: Group ID は差分 (`今回 - 前回 - 1`)、Object ID は絶対値
+    - Group が変わるとき: Group ID は差分、Object ID は絶対値
     - 同じ Group のとき: Group ID は省略 (前回を継承)、Object ID は差分 (`今回 - 前回`)
 
     Object ID の差分に +1 は付かない (subgroup とは異なる)。
+
+    Group ID の差分は要求された GROUP_ORDER の向きで解決されるため、Ascending では
+    `今回 - 前回 - 1`、Descending では `前回 - 今回 - 1` を書く。要求と逆向きの
+    Group は peer が解決できないので拒否する
+    (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    この節番号・規則は draft 由来であり将来の改訂で変更されうる。
     """
     flags = 0x03  # Subgroup ID: Explicit
     fields = bytearray()
@@ -1687,7 +1729,8 @@ def _encode_fetch_object(
     elif group_id != writer.last_group_id:
         flags |= 0x08
         flags |= 0x04
-        fields += moqt.encode_varint(group_id - writer.last_group_id - 1)
+        delta = _fetch_group_id_delta(writer.group_order, writer.last_group_id, group_id)
+        fields += moqt.encode_varint(delta)
         fields += moqt.encode_varint(subgroup_id)
         fields += moqt.encode_varint(object_id)
     else:
@@ -1704,6 +1747,30 @@ def _encode_fetch_object(
     body += moqt.encode_varint(len(payload))
     body += payload
     return bytes(body)
+
+
+def _fetch_group_id_delta(group_order: int, previous_group_id: int, group_id: int) -> int:
+    """fetch stream の Group ID の差分値を求める。
+
+    Group Order の向きに従い、Ascending では `今回 - 前回 - 1`、Descending では
+    `前回 - 今回 - 1` になる
+    (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    要求と同じ向きで進まない Group は差分で表現できないため `MoqtError` にする。
+    この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+    """
+    if group_order == GROUP_ORDER_DESCENDING:
+        if group_id >= previous_group_id:
+            raise MoqtError(
+                f"fetch stream with a descending group order cannot send group {group_id} "
+                f"after group {previous_group_id}"
+            )
+        return previous_group_id - group_id - 1
+    if group_id <= previous_group_id:
+        raise MoqtError(
+            f"fetch stream with an ascending group order cannot send group {group_id} "
+            f"after group {previous_group_id}"
+        )
+    return group_id - previous_group_id - 1
 
 
 def _object_status_to_write(status: int | None, payload: bytes) -> int | None:

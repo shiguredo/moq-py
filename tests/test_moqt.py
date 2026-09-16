@@ -86,13 +86,18 @@ def _subscribe_round_trip(
     return request_id
 
 
-def _fetch_round_trip(client: Session, server: Session, stream_id: int) -> int:
+def _fetch_round_trip(
+    client: Session,
+    server: Session,
+    stream_id: int,
+    parameters: dict[int, object] | None = None,
+) -> int:
     """FETCH を送り、FETCH_OK を受け取るまでを往復させる。
 
     購読と同じ Track への FETCH は、まだ配信実績が無い間は DOES_NOT_EXIST で
     拒否されるため、購読とは別の Track を使う。
     """
-    events = client.send_fetch([b"fetch-ns"], b"fetch-track", {})
+    events = client.send_fetch([b"fetch-ns"], b"fetch-track", parameters or {})
     request_id = _request_id(events[0])
     client.register_local_request_stream(stream_id, request_id)
     server.receive_request_stream(stream_id, _message_data(events[0]), "peer")
@@ -1801,6 +1806,99 @@ def test_fetch_state_accessors_report_the_fetch() -> None:
     publisher_entry = server.fetch(request_id)
     assert publisher_entry is not None
     assert publisher_entry["my_role"] == "publisher"
+
+
+def test_received_fetch_stream_resolves_descending_group_ids() -> None:
+    """
+    GROUP_ORDER が Descending の fetch ストリームで Group ID が降順に解決されることを確認する。
+
+    Group ID は直前のオブジェクトからの差分であり、解決方向は FETCH の GROUP_ORDER で
+    決まる (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter) /
+    §11.4.1.1 (Flags))。Ascending 前提で解決すると Group ID が誤った値になる。
+    """
+    client, server = _setup()
+    # GROUP_ORDER = 0x02 (Descending) で FETCH を送る
+    request_id = _fetch_round_trip(client, server, 4, {moqt.PARAM_GROUP_ORDER: 0x02})
+    entry = client.fetch(request_id)
+    assert entry is not None
+    assert entry["group_order"] == 0x02
+
+    # 1 件目は Group 8 / Object 1 を絶対値で書く。Flags は Subgroup ID 明示 (0x03)、
+    # Group ID Delta あり (0x08)、Object ID Delta あり (0x04)、Publisher Priority (0x10)
+    first = (
+        encode_varint(0x1F)
+        + encode_varint(8)
+        + encode_varint(0)
+        + encode_varint(1)
+        + bytes([128])
+        + encode_varint(len(b"group-8"))
+        + b"group-8"
+    )
+    # 2 件目は Group 7 を Descending の差分 0 (8 - 7 - 1) で書く。Group が変わるため
+    # Object ID は絶対値になる
+    second = (
+        encode_varint(0x1F)
+        + encode_varint(0)
+        + encode_varint(0)
+        + encode_varint(0)
+        + bytes([128])
+        + encode_varint(len(b"group-7"))
+        + b"group-7"
+    )
+    stream = encode_varint(moqt.FETCH_HEADER_TYPE) + encode_varint(request_id) + first + second
+
+    _objects, events = client.receive_data_stream(2, stream, moqt.FETCH_HEADER_TYPE)
+
+    objects = [event for event in events if event.kind == "object"]
+    assert [(event.group_id, event.object_id) for event in objects] == [(8, 1), (7, 0)]
+    assert [event.data for event in objects] == [b"group-8", b"group-7"]
+
+
+def test_received_fetch_stream_waits_for_the_fetch_header() -> None:
+    """
+    FETCH_HEADER が複数の断片に分かれても Group Order が反映されることを確認する。
+
+    fetch ストリームのデコーダは、Request ID を運ぶ FETCH_HEADER をデコードできるまで
+    作らない。Group Order は Request ID から引くため、ヘッダが途中で切れた断片では
+    デコードを保留し、続きの到着後に解決する
+    (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    """
+    client, server = _setup()
+    request_id = _fetch_round_trip(client, server, 4, {moqt.PARAM_GROUP_ORDER: 0x02})
+
+    # 1 件目は Group 5 を絶対値で、2 件目は Group 4 を Descending の差分 0 で書く
+    first = (
+        encode_varint(0x1F)
+        + encode_varint(5)
+        + encode_varint(0)
+        + encode_varint(2)
+        + bytes([128])
+        + encode_varint(len(b"first"))
+        + b"first"
+    )
+    second = (
+        encode_varint(0x1F)
+        + encode_varint(0)
+        + encode_varint(0)
+        + encode_varint(0)
+        + bytes([128])
+        + encode_varint(len(b"second"))
+        + b"second"
+    )
+
+    # stream type だけの断片ではヘッダが揃わないため、何もデコードしない
+    _objects, events = client.receive_data_stream(
+        2, encode_varint(moqt.FETCH_HEADER_TYPE), moqt.FETCH_HEADER_TYPE
+    )
+    assert events == []
+
+    # 続きの断片でヘッダとオブジェクトが揃う
+    rest = encode_varint(request_id) + first + second
+    _objects, events = client.receive_data_stream(2, rest, None)
+
+    objects = [event for event in events if event.kind == "object"]
+    assert [(event.group_id, event.object_id) for event in objects] == [(5, 2), (4, 0)]
+    assert [event.data for event in objects] == [b"first", b"second"]
 
 
 def test_track_status_state_accessors_report_the_response() -> None:

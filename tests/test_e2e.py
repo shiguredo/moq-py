@@ -20,8 +20,18 @@ from moqt.moq import (
     ServerSession,
     Subscription,
 )
-from moqt.moq._runtime import MoqtError, Runtime
-from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
+from moqt.moq._runtime import (
+    GROUP_ORDER_DESCENDING,
+    MoqtError,
+    Runtime,
+)
+from moqt.moq.server import (
+    FetchRequest,
+    FetchResponse,
+    Publication,
+    PublisherRequest,
+    SubscriptionRequest,
+)
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
 
 # テストで使う Track
@@ -1211,6 +1221,43 @@ async def test_fetch_receives_objects(moq_pair: MoqPair) -> None:
         b"fetched-3",
         b"",
     ]
+
+
+async def test_fetch_responds_in_a_descending_group_order(moq_pair: MoqPair) -> None:
+    """
+    GROUP_ORDER が Descending の FETCH で Group が降順に届くことを確認する。
+
+    fetch ストリームの Group ID は差分で表現され、その解決方向は要求された
+    GROUP_ORDER で決まる。要求と逆向きの Group は差分で表現できないため拒否する
+    (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter) /
+    §11.4.1.1 (Flags))。
+    """
+    responses: list[FetchResponse] = []
+
+    async def on_fetch(request: FetchRequest) -> None:
+        response = await request.respond((0, 0), end_of_track=False)
+        responses.append(response)
+        # Descending の要求なので Group を降順に送る
+        await response.send_object(8, 1, b"group-8")
+        await response.send_object(7, 0, b"group-7")
+
+    moq_pair.server.on_fetch(on_fetch)
+
+    fetch = await moq_pair.client.fetch(
+        NAMESPACE, TRACK_NAME, {moqt.PARAM_GROUP_ORDER: GROUP_ORDER_DESCENDING}
+    )
+    await wait_until(lambda: bool(responses))
+
+    received = await _take_fetch_objects(fetch, 2)
+
+    assert [(item.group_id, item.object_id) for item in received] == [(8, 1), (7, 0)]
+    assert [item.payload for item in received] == [b"group-8", b"group-7"]
+
+    # 要求と逆向きの Group は差分で表現できない
+    with pytest.raises(MoqtError, match="descending group order"):
+        await responses[0].send_object(9, 0, b"ascending")
+
+    await responses[0].close()
 
 
 def test_low_level_names_are_exported_from_the_package_root() -> None:

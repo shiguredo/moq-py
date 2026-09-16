@@ -54,6 +54,7 @@ use shiguredo_moqt::stream::decoder::{
     DecodedFetchEntry, DecodedSubgroupObject, FetchStreamDecoder, SubgroupStreamDecoder,
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
+use shiguredo_moqt::stream::fetch::FetchHeader;
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
 use shiguredo_moqt::track_properties::{TrackProperties, TrackProperty, TrackPropertyValue};
 use shiguredo_moqt::varint;
@@ -641,6 +642,11 @@ fn fetch_to_python(py: Python<'_>, fetch: &Fetch) -> PyResult<Py<PyDict>> {
     )?;
     dict.set_item("end_of_track", fetch.end_of_track)?;
     dict.set_item("response_received", fetch.response_received)?;
+    // Group Order は FETCH の GROUP_ORDER パラメータで要求された値であり、省略時は
+    // `None` になる。Group ID の差分の解決方向と、届いた Group の順序検証に使う
+    // (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    // draft 由来の値であり、将来の改訂で変更される可能性がある
+    dict.set_item("group_order", fetch.group_order)?;
     Ok(dict.unbind())
 }
 
@@ -1444,11 +1450,12 @@ pub(crate) struct CoreSession {
     /// ライブラリがプロトコル違反を検出するとセッションを閉じるイベントを
     /// 発行する。その理由を Python 側から参照できるように保持する。
     last_error: Option<String>,
-    /// stream type の varint を消費済みのデータストリーム。
+    /// stream type を状態機械へ通知済みのデータストリームと、その種別。
     ///
     /// MoQT の単方向ストリームは先頭に stream type を持つ
     /// (draft-ietf-moq-transport-21 §6.4.1 (Unidirectional Streams))。
-    data_stream_types_received: HashSet<u64>,
+    /// 種別はデコーダの作成にも使うため保持する。
+    data_stream_types: HashMap<u64, DataStreamType>,
     /// ヘッダをデコード済みのデータストリーム。
     data_headers_decoded: HashSet<u64>,
     started: bool,
@@ -1517,19 +1524,24 @@ impl CoreSession {
             pending_fetch_entries: HashMap::new(),
             peer_setup_options: None,
             last_error: None,
-            data_stream_types_received: HashSet::new(),
+            data_stream_types: HashMap::new(),
             data_headers_decoded: HashSet::new(),
             started: false,
             established: false,
         })
     }
 
-    /// データストリームの種別を状態機械へ通知し、デコーダを用意する。
-    fn ensure_data_decoder(
+    /// データストリームの種別を状態機械へ通知し、通知済みの種別を返す。
+    ///
+    /// 通知はストリームごとに 1 度だけ行う。既に通知済みの場合はその種別を返す。
+    fn notify_data_stream_type(
         &mut self,
         stream_id: u64,
         stream_type: Option<u64>,
     ) -> PyResult<DataStreamType> {
+        if let Some(stream_type) = self.data_stream_types.get(&stream_id) {
+            return Ok(*stream_type);
+        }
         let Some(stream_type) = stream_type else {
             return Err(PyValueError::new_err(format!(
                 "stream type is required for the first fragment of data stream {stream_id}"
@@ -1539,18 +1551,65 @@ impl CoreSession {
             .session
             .recv_data_stream_type(DataStreamId(stream_id), stream_type)
             .map_err(runtime_error)?;
+        self.data_stream_types.insert(stream_id, stream_type);
+        Ok(stream_type)
+    }
+
+    /// 種別ごとのデコーダを用意する。
+    ///
+    /// fetch ストリームは先頭の FETCH_HEADER が Request ID を運び、Group Order は
+    /// FETCH 要求ごとに決まる。Group Order は Group ID の差分の解決方向と届いた
+    /// Group の順序検証に使うため、ヘッダをデコードできるまでデコーダを作らない。
+    /// ヘッダがまだ揃っていない場合は `None` を返し、続きの断片を待つ
+    /// (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))。
+    /// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+    fn create_data_decoder(
+        &self,
+        stream_type: DataStreamType,
+        buffered: &[u8],
+    ) -> PyResult<Option<DataStreamDecoder>> {
         // 種別ごとのデコーダを用意する。padding stream は読み捨てるだけである
         let decoder = match stream_type {
             DataStreamType::Subgroup => DataStreamDecoder::Subgroup(SubgroupStreamDecoder::new()),
-            DataStreamType::Fetch => DataStreamDecoder::Fetch(Box::new(
-                FetchStreamDecoder::new_with_group_order(DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING)
-                    .map_err(runtime_error)?,
-            )),
+            DataStreamType::Fetch => {
+                let Some(group_order) = self.resolve_fetch_group_order(buffered)? else {
+                    return Ok(None);
+                };
+                DataStreamDecoder::Fetch(Box::new(
+                    FetchStreamDecoder::new_with_group_order(group_order).map_err(runtime_error)?,
+                ))
+            }
             DataStreamType::Padding => DataStreamDecoder::Padding,
         };
-        self.data_decoders.insert(stream_id, decoder);
-        self.data_stream_types_received.insert(stream_id);
-        Ok(stream_type)
+        Ok(Some(decoder))
+    }
+
+    /// 受信した fetch ストリームの Group Order を FETCH_HEADER から解決する。
+    ///
+    /// FETCH_HEADER は Request ID だけを運ぶため、状態機械が保持する request から
+    /// Group Order を引く。通常の FETCH 応答は fetch、fill fetch stream は起因した
+    /// subscription に紐づく (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+    /// 省略された要求では既定値 Ascending (0x1) になる
+    /// (draft-ietf-moq-transport-21 §10.5 (DEFAULT PUBLISHER GROUP ORDER))。
+    /// ヘッダがまだ揃っていない場合は `None` を返し、呼び出し側は続きの断片を待つ。
+    /// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+    fn resolve_fetch_group_order(&self, buffered: &[u8]) -> PyResult<Option<u8>> {
+        let header = match FetchHeader::decode(buffered) {
+            Ok((header, _)) => header,
+            Err(MessageError::UnexpectedEof) => return Ok(None),
+            Err(error) => return Err(runtime_error(error)),
+        };
+        let group_order = self
+            .session
+            .fetch(header.request_id)
+            .and_then(|fetch| fetch.group_order)
+            .or_else(|| {
+                self.session
+                    .subscription(header.request_id)
+                    .and_then(|subscription| subscription.group_order)
+            })
+            .unwrap_or(DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING);
+        Ok(Some(group_order))
     }
 
     /// 状態機械が発行したイベントをすべて取り出す。
@@ -2126,9 +2185,17 @@ impl CoreSession {
 
         // 最初の断片に含まれる stream type を状態機械へ通知する。
         // stream type の varint は I/O 層が取り除き、種別だけを渡す
-        if !self.data_stream_types_received.contains(&stream_id) {
-            let stream_type = self.ensure_data_decoder(stream_id, stream_type)?;
-            let _ = stream_type;
+        let stream_type = self.notify_data_stream_type(stream_id, stream_type)?;
+
+        // 種別ごとのデコーダを用意する。fetch ストリームは Request ID を運ぶ
+        // FETCH_HEADER が揃うまで作らない
+        if !self.data_decoders.contains_key(&stream_id) {
+            let buffered = self.data_buffers.get(stream_id).to_vec();
+            let Some(decoder) = self.create_data_decoder(stream_type, &buffered)? else {
+                // ヘッダの続きを待つ。断片はバッファへ保持したままにする
+                return Ok((Vec::new(), self.drain_events(py)?));
+            };
+            self.data_decoders.insert(stream_id, decoder);
         }
 
         let buffered = self.data_buffers.get(stream_id).to_vec();
@@ -2352,7 +2419,7 @@ impl CoreSession {
         self.data_headers.remove(&stream_id);
         self.pending_subgroup_objects.remove(&stream_id);
         self.pending_fetch_entries.remove(&stream_id);
-        self.data_stream_types_received.remove(&stream_id);
+        self.data_stream_types.remove(&stream_id);
         self.data_headers_decoded.remove(&stream_id);
 
         let end = request_stream_end(reset, error_code, reliable_size)?;
