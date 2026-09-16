@@ -62,6 +62,7 @@ class Publication:
         payload: bytes,
         *,
         subgroup_id: int | None = None,
+        subgroup_id_mode: str | None = None,
         publisher_priority: int | None = None,
         end_of_group: bool = False,
         status: int | None = None,
@@ -73,6 +74,14 @@ class Publication:
         `moqt.moqt.OBJECT_STATUS_END_OF_TRACK` を渡すと、その Location 以降に
         オブジェクトが無いことを通知する。このとき `payload` は空でなければならない
         (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
+
+        `subgroup_id_mode` は Subgroup ID のエンコードモードであり、
+        `moqt.moq.SUBGROUP_ID_MODE_ZERO` / `SUBGROUP_ID_MODE_FIRST_OBJECT_ID` /
+        `SUBGROUP_ID_MODE_EXPLICIT` のいずれかを渡す。省略した場合は `subgroup_id` を
+        渡せば `explicit`、渡さなければ `zero` になる。`first_object_id` を選ぶと
+        Subgroup ID フィールドを送らず、このストリームの最初の Object ID が
+        Subgroup ID になる
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
 
         `properties_data` には `moqt.moqt.ObjectProperties` の encode 結果を渡す。
         Properties の有無は subgroup ヘッダで固定されるため、同じ subgroup の
@@ -86,6 +95,7 @@ class Publication:
             object_id,
             payload,
             subgroup_id=subgroup_id,
+            subgroup_id_mode=subgroup_id_mode,
             publisher_priority=publisher_priority,
             end_of_group=end_of_group,
             status=status,

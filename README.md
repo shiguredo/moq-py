@@ -123,16 +123,33 @@ asyncio.run(main())
 
 ```python
 from moqt import moqt
+from moqt.moq import SUBGROUP_ID_MODE_EXPLICIT, SUBGROUP_ID_MODE_FIRST_OBJECT_ID
 
 # subgroup ストリームで送る。subgroup_id / publisher_priority / end_of_group も指定できる
 await publication.send_object(1, 0, b"payload")
 
+# Subgroup ID を明示する
+await publication.send_object(
+    1,
+    1,
+    b"payload",
+    subgroup_id=3,
+    subgroup_id_mode=SUBGROUP_ID_MODE_EXPLICIT,
+)
+
+# Subgroup ID を最初の Object ID にする。Subgroup ID フィールドを送らない分だけ wire が短くなる
+await publication.send_object(1, 2, b"payload", subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID)
+
 # End of Group を通知する。このとき payload は空でなければならない
-await publication.send_object(1, 1, b"", status=moqt.OBJECT_STATUS_END_OF_GROUP)
+await publication.send_object(1, 3, b"", status=moqt.OBJECT_STATUS_END_OF_GROUP)
 
 # データグラムで送る
 await publication.send_datagram(1, 0, b"datagram payload")
 ```
+
+受信側では、Subgroup ID を最初の Object ID として決めるモードでも、最初のオブジェクトを
+受信した時点で `MoqtObject.subgroup_id` に値が入ります
+(draft-ietf-moq-transport-21 §11.3.1)。
 
 > [!WARNING]
 >

@@ -91,7 +91,9 @@ class MoqtObject:
     subgroup_id: int | None = None
     """オブジェクトを含む subgroup の Subgroup ID。
 
-    ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` になる。
+    ヘッダが Subgroup ID を最初の Object ID として決めるモードでも、最初の
+    オブジェクトを受信した時点で確定した値が入る
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
     データグラムでは常に `None` になる。
     """
 

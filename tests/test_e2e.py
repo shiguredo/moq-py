@@ -8,7 +8,18 @@ import logging
 
 import pytest
 from moqt import loc, moqt
-from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, ServerSession, Subscription
+from moqt.moq import (
+    SUBGROUP_ID_MODE_EXPLICIT,
+    SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+    SUBGROUP_ID_MODE_ZERO,
+    Client,
+    Fetch,
+    MoqtObject,
+    PeerGoaway,
+    Server,
+    ServerSession,
+    Subscription,
+)
 from moqt.moq._runtime import MoqtError, Runtime
 from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
 from moqt.moq.testing import ClientFactory, MoqPair, collect_objects, wait_until
@@ -1437,3 +1448,128 @@ async def test_cancelled_fetch_is_removed_from_the_session(
 
     assert moq_pair.client.fetch_state(fetch.request_id) is None
     assert moq_pair.client.established is True
+
+
+async def test_subgroup_id_mode_first_object_id_is_delivered(moq_pair: MoqPair) -> None:
+    """
+    Subgroup ID を最初の Object ID として決めるモードで配送できることを確認する。
+
+    このモードのヘッダは Subgroup ID フィールドを持たないため、受信側は最初の
+    オブジェクトを受信した時点で Subgroup ID を確定する。2 件目以降のオブジェクトでも
+    同じ Subgroup ID が載る
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # Subgroup ID を最初の Object ID として決めるモードで 2 件送る
+    await published[0].send_object(
+        1,
+        5,
+        b"first",
+        subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+    )
+    await published[0].send_object(
+        1,
+        6,
+        b"second",
+        subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+    )
+
+    received = await _take_objects(subscription, 2)
+
+    assert [item.object_id for item in received] == [5, 6]
+    assert [item.payload for item in received] == [b"first", b"second"]
+    # 最初の Object ID が Subgroup ID として確定する
+    assert [item.subgroup_id for item in received] == [5, 5]
+
+
+async def test_subgroup_id_mode_cannot_change_within_a_group(moq_pair: MoqPair) -> None:
+    """
+    同じ Group の途中で Subgroup ID のモードを変えられないことを確認する。
+
+    SUBGROUP_ID_MODE はヘッダで固定されるため、同じ subgroup の途中で違うモードを
+    指定すると送信側が `MoqtError` で拒否する
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    await published[0].send_object(
+        1,
+        5,
+        b"first",
+        subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+    )
+
+    # 同じ Group でモードを変える送信は拒否される
+    with pytest.raises(MoqtError, match="cannot change its subgroup id mode"):
+        await published[0].send_object(1, 6, b"second", subgroup_id=3)
+
+    # 最初のオブジェクトは届いており、セッションは壊れていない
+    received = await _take_objects(subscription, 1)
+    assert received[0].payload == b"first"
+    assert received[0].subgroup_id == 5
+    assert moq_pair.client.established is True
+
+
+async def test_subgroup_id_modes_are_resolved_on_the_sending_side(moq_pair: MoqPair) -> None:
+    """
+    送信側が Subgroup ID のモードと値の組み合わせを検証することを確認する。
+
+    モードを省略した場合は `subgroup_id` を渡せば明示モード、渡さなければ 0 固定モードに
+    なる。モードと値が食い違う送信は wire と状態機械が食い違うため、送信前に拒否する
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # モードを省略した場合は 0 固定モードになる
+    await published[0].send_object(1, 0, b"zero")
+    received = await _take_objects(subscription, 1)
+    assert received[0].subgroup_id == 0
+
+    # モードと値が食い違う送信は拒否される
+    with pytest.raises(MoqtError, match="subgroup id must be omitted"):
+        await published[0].send_object(
+            2,
+            0,
+            b"invalid",
+            subgroup_id=3,
+            subgroup_id_mode=SUBGROUP_ID_MODE_ZERO,
+        )
+    with pytest.raises(MoqtError, match="unknown subgroup id mode"):
+        await published[0].send_object(2, 0, b"invalid", subgroup_id_mode="reserved")
+
+    # 明示モードではヘッダの値がそのまま受信側へ届く
+    await published[0].send_object(
+        2,
+        7,
+        b"explicit",
+        subgroup_id=3,
+        subgroup_id_mode=SUBGROUP_ID_MODE_EXPLICIT,
+    )
+    received = await _take_objects(subscription, 1)
+    assert received[0].payload == b"explicit"
+    assert received[0].subgroup_id == 3

@@ -78,6 +78,10 @@ mod _native {
         PADDING_DATAGRAM_TYPE, PADDING_STREAM_TYPE, SETUP_STREAM_TYPE,
     };
 
+    use crate::core::{
+        SUBGROUP_ID_MODE_EXPLICIT, SUBGROUP_ID_MODE_FIRST_OBJECT_ID, SUBGROUP_ID_MODE_ZERO,
+    };
+
     // MoQT のプロトコル層 (moqt.moqt)
     #[pymodule_export]
     use crate::codec::{
@@ -274,6 +278,16 @@ mod _native {
         // Object Status (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
         module.add("OBJECT_STATUS_END_OF_GROUP", OBJECT_STATUS_END_OF_GROUP)?;
         module.add("OBJECT_STATUS_END_OF_TRACK", OBJECT_STATUS_END_OF_TRACK)?;
+
+        // Subgroup ID のエンコードモード (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+        // SUBGROUP_ID_MODE は Type Flags の bits 1-2 (mask 0x06) の 2 bit である。
+        // 0b11 は将来のために予約されている
+        module.add("SUBGROUP_ID_MODE_ZERO", SUBGROUP_ID_MODE_ZERO)?;
+        module.add(
+            "SUBGROUP_ID_MODE_FIRST_OBJECT_ID",
+            SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+        )?;
+        module.add("SUBGROUP_ID_MODE_EXPLICIT", SUBGROUP_ID_MODE_EXPLICIT)?;
 
         // 既定値
         module.add("PUBLISHER_PRIORITY_DEFAULT", PUBLISHER_PRIORITY_DEFAULT)?;

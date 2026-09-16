@@ -153,6 +153,15 @@ DEFAULT_SUBSCRIBER_PRIORITY = moqt.DEFAULT_SUBSCRIBER_PRIORITY
 # セッションのタイムアウト判定間隔 (秒)
 TICK_INTERVAL = 0.1
 
+# Subgroup Header の SUBGROUP_ID_MODE (draft-ietf-moq-transport-21 §11.3.1)。
+# `ZERO` は Subgroup ID を 0 に固定し、`FIRST_OBJECT_ID` は最初の Object ID を
+# Subgroup ID として使う (Subgroup ID フィールドを送らない分だけ wire が短くなる)。
+# `EXPLICIT` は Subgroup ID フィールドを明示的に送る。0b11 は将来のために予約されている。
+# 高レベル API から参照できるよう、同じ値の定数を `moqt.moqt` も公開する。
+SUBGROUP_ID_MODE_ZERO = "zero"
+SUBGROUP_ID_MODE_FIRST_OBJECT_ID = "first_object_id"
+SUBGROUP_ID_MODE_EXPLICIT = "explicit"
+
 # ストリームの種別
 _STREAM_CONTROL = "control"
 _STREAM_REQUEST = "request"
@@ -270,6 +279,12 @@ class SubgroupWriter:
 
     stream_id: int
     group_id: int
+    subgroup_id_mode: str = SUBGROUP_ID_MODE_ZERO
+    """ストリームを開いたときの SUBGROUP_ID_MODE。
+
+    同じ Group のオブジェクトは同じ encoding を続ける
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
     last_object_id: int | None = None
     has_properties: bool = False
     """ヘッダが Properties を持つか。
@@ -980,6 +995,7 @@ class Runtime:
         payload: bytes,
         *,
         subgroup_id: int | None = None,
+        subgroup_id_mode: str | None = None,
         publisher_priority: int | None = None,
         end_of_group: bool = False,
         status: int | None = None,
@@ -990,11 +1006,19 @@ class Runtime:
         同じ Request ID と Group ID のストリームが既にあれば再利用する。
         Object ID はストリーム内で差分として表現されるため、直前の値との差を書く。
 
+        `subgroup_id_mode` は Subgroup ID のエンコードモードである。省略した場合は
+        `subgroup_id` を渡せば `explicit`、渡さなければ `zero` になる。
+        `first_object_id` を選ぶと Subgroup ID フィールドを送らず、このストリームの
+        最初の Object ID が Subgroup ID になる。モードは Group ごとに固定され、
+        同じ Group の途中で違うモードを指定すると `MoqtError` になる
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+
         `properties_data` の有無は、そのストリームの最初のオブジェクトでヘッダの
         PROPERTIES bit に固定される
         (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。以降のオブジェクトの
         Properties の有無がヘッダと食い違うと `MoqtError` になる。
         """
+        mode = _resolve_subgroup_id_mode(subgroup_id, subgroup_id_mode)
         # 状態を進める前にバイト列を組み立て、不正な組み合わせでは送信も状態更新もしない
         writer = self._subgroups.get(request_id)
         opens_stream = writer is None or writer.group_id != group_id
@@ -1005,6 +1029,13 @@ class Runtime:
             raise MoqtError(
                 f"stream for request {request_id} carries objects {expected} properties; "
                 "properties must be consistent within a subgroup"
+            )
+        # SUBGROUP_ID_MODE も subgroup 内で一貫していなければならない。ヘッダと
+        # 食い違うモードで書くと受信側が Subgroup ID を解決できなくなる
+        if not opens_stream and writer.subgroup_id_mode != mode:
+            raise MoqtError(
+                f"stream for request {request_id} uses subgroup id mode "
+                f"{writer.subgroup_id_mode}; a subgroup cannot change its subgroup id mode"
             )
         # Object ID は subgroup ストリーム内の差分として表現する。新しいストリームを
         # 開く場合は絶対値で書くため、直前の Group の Object ID を基準にしない
@@ -1029,6 +1060,7 @@ class Runtime:
                 track_alias,
                 group_id,
                 subgroup_id,
+                mode,
                 publisher_priority,
                 end_of_group,
                 has_properties=properties_data is not None,
@@ -1052,6 +1084,7 @@ class Runtime:
         track_alias: int,
         group_id: int,
         subgroup_id: int | None,
+        subgroup_id_mode: str,
         publisher_priority: int | None,
         end_of_group: bool,
         *,
@@ -1061,13 +1094,16 @@ class Runtime:
         stream_id = await self._ops.open_uni_stream()
         if stream_id < 0:
             raise ConnectionError("failed to open a subgroup stream")
+        # Subgroup ID フィールドを書くのは explicit モードだけである
+        header_subgroup_id = subgroup_id if subgroup_id_mode == SUBGROUP_ID_MODE_EXPLICIT else None
         await self._apply_events(
             self._core.send_subgroup_header(
                 stream_id,
                 request_id,
                 track_alias,
                 group_id,
-                subgroup_id,
+                header_subgroup_id,
+                subgroup_id_mode,
                 publisher_priority,
                 has_properties,
                 end_of_group,
@@ -1077,15 +1113,21 @@ class Runtime:
         header = _encode_subgroup_header(
             track_alias,
             group_id,
-            subgroup_id,
+            header_subgroup_id,
             publisher_priority,
+            subgroup_id_mode=subgroup_id_mode,
             has_properties=has_properties,
             end_of_group=end_of_group,
         )
         await self._ops.send_stream_data(stream_id, header, False)
         self._local_streams.add(stream_id)
         self._streams[stream_id] = StreamInfo(kind=_STREAM_DATA)
-        return SubgroupWriter(stream_id=stream_id, group_id=group_id, has_properties=has_properties)
+        return SubgroupWriter(
+            stream_id=stream_id,
+            group_id=group_id,
+            subgroup_id_mode=subgroup_id_mode,
+            has_properties=has_properties,
+        )
 
     async def _finish_subgroup_writer(self, request_id: int, writer: SubgroupWriter) -> None:
         """subgroup ストリームを FIN で終了する。"""
@@ -1512,10 +1554,33 @@ def _decode_first_varint(data: bytes) -> int | None:
     return None if decoded is None else decoded[0]
 
 
+def _resolve_subgroup_id_mode(subgroup_id: int | None, subgroup_id_mode: str | None) -> str:
+    """Subgroup ID のエンコードモードを確定する。
+
+    モードを省略した場合は `subgroup_id` の有無から決める。モードと `subgroup_id` の
+    組み合わせが不正な場合は `MoqtError` を送出する
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    if subgroup_id_mode is None:
+        return SUBGROUP_ID_MODE_EXPLICIT if subgroup_id is not None else SUBGROUP_ID_MODE_ZERO
+    if subgroup_id_mode == SUBGROUP_ID_MODE_ZERO:
+        if subgroup_id is not None:
+            raise MoqtError("subgroup id must be omitted when the mode is zero")
+        return subgroup_id_mode
+    if subgroup_id_mode == SUBGROUP_ID_MODE_FIRST_OBJECT_ID:
+        if subgroup_id is not None:
+            raise MoqtError("subgroup id must be omitted when the mode is first_object_id")
+        return subgroup_id_mode
+    if subgroup_id_mode == SUBGROUP_ID_MODE_EXPLICIT:
+        if subgroup_id is None:
+            raise MoqtError("subgroup id is required when the mode is explicit")
+        return subgroup_id_mode
+    raise MoqtError(f"unknown subgroup id mode: {subgroup_id_mode}")
+
+
 def _subgroup_type_byte(
-    *,
     has_properties: bool,
-    subgroup_id: int | None,
+    subgroup_id_mode: str,
     end_of_group: bool,
     default_priority: bool,
     first_object: bool = False,
@@ -1523,12 +1588,16 @@ def _subgroup_type_byte(
     """subgroup ヘッダの type byte を組み立てる (draft-ietf-moq-transport-21 §11.3.1)。
 
     bit 4 (0x10) は常に 1 でなければならない。SUBGROUP_ID_MODE は bits 1-2
-    (mask 0x06) の 2 bit であり、Subgroup ID を明示する場合は 0b10 を置く。
+    (mask 0x06) の 2 bit であり、`zero` は 0b00、`first_object_id` は 0b01、
+    `explicit` は 0b10 を置く。0b11 は将来のために予約されている。
     """
     type_byte = 0x10
     if has_properties:
         type_byte |= 0x01
-    if subgroup_id is not None:
+    if subgroup_id_mode == SUBGROUP_ID_MODE_FIRST_OBJECT_ID:
+        # SUBGROUP_ID_MODE = 0b01 (Subgroup ID は最初の Object ID)
+        type_byte |= 0x02
+    elif subgroup_id_mode == SUBGROUP_ID_MODE_EXPLICIT:
         # SUBGROUP_ID_MODE = 0b10 (Subgroup ID フィールドが存在する)
         type_byte |= 0x04
     if end_of_group:
@@ -1546,13 +1615,17 @@ def _encode_subgroup_header(
     subgroup_id: int | None,
     publisher_priority: int | None,
     *,
+    subgroup_id_mode: str = SUBGROUP_ID_MODE_ZERO,
     has_properties: bool = False,
     end_of_group: bool = False,
 ) -> bytes:
-    """subgroup ヘッダをエンコードする (draft-ietf-moq-transport-21 §11.3.1)。"""
+    """subgroup ヘッダをエンコードする (draft-ietf-moq-transport-21 §11.3.1)。
+
+    Subgroup ID フィールドを書くのは `explicit` モードだけである。
+    """
     type_byte = _subgroup_type_byte(
         has_properties=has_properties,
-        subgroup_id=subgroup_id,
+        subgroup_id_mode=subgroup_id_mode,
         end_of_group=end_of_group,
         default_priority=publisher_priority is None,
     )
@@ -1560,7 +1633,9 @@ def _encode_subgroup_header(
     header += moqt.encode_varint(type_byte)
     header += moqt.encode_varint(track_alias)
     header += moqt.encode_varint(group_id)
-    if subgroup_id is not None:
+    if subgroup_id_mode == SUBGROUP_ID_MODE_EXPLICIT:
+        if subgroup_id is None:
+            raise MoqtError("explicit subgroup id mode requires a subgroup id")
         header += moqt.encode_varint(subgroup_id)
     if publisher_priority is not None:
         header.append(publisher_priority)

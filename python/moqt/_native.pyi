@@ -875,8 +875,9 @@ class Event:
         """
         受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
         
-        ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` に
-        なる (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+        ヘッダが Subgroup ID を最初の Object ID として決めるモードでも、最初の
+        Object を受信した時点で確定した値が入る
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
         """
     @property
     def track_alias(self, /) -> int |None:
@@ -1923,11 +1924,16 @@ class Session:
         """
         REQUEST_UPDATE を送信する。
         """
-    def send_subgroup_header(self, /, stream_id: int, request_id: int, track_alias: int, group_id: int, subgroup_id: int |None, publisher_priority: int |None = None, has_properties: bool = False, end_of_group: bool = False, first_object: bool = False) -> list[Event]:
+    def send_subgroup_header(self, /, stream_id: int, request_id: int, track_alias: int, group_id: int, subgroup_id: int |None = None, subgroup_id_mode: str = "zero", publisher_priority: int |None = None, has_properties: bool = False, end_of_group: bool = False, first_object: bool = False) -> list[Event]:
         """
         送信する subgroup ストリームを登録する。
         
         実際のバイト列は Python 側が組み立てるため、ここでは状態機械へ登録だけを行う。
+        
+        `subgroup_id_mode` は Subgroup ID のエンコードモードであり、`"zero"` /
+        `"first_object_id"` / `"explicit"` のいずれかである。Subgroup ID を最初の
+        Object ID として決めるモードでは `subgroup_id` を渡さない
+        (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
         """
     def send_subgroup_object(self, /, stream_id: int, object_id: int, properties_data: Sequence[int] |None = None) -> tuple[bool, list[Event]]:
         """

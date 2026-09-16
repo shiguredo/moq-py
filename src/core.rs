@@ -65,6 +65,18 @@ use shiguredo_moqt::varint;
 /// 上限を超えるのは peer が壊れたストリームを送り続けている場合に限られる。
 const MAX_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 
+// Subgroup ID のエンコードモード (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+//
+// SUBGROUP_ID_MODE は Type Flags の bits 1-2 (mask 0x06) の 2 bit である。Python からは
+// 数値ではなく名前で指定させるため、モード名の文字列として公開する。0b11 は将来の
+// ために予約されている。draft 由来であり、将来の改訂で変更される可能性がある。
+/// Subgroup ID を 0 に固定するモード (SUBGROUP_ID_MODE = 0b00)
+pub(crate) const SUBGROUP_ID_MODE_ZERO: &str = "zero";
+/// 最初の Object ID を Subgroup ID にするモード (SUBGROUP_ID_MODE = 0b01)
+pub(crate) const SUBGROUP_ID_MODE_FIRST_OBJECT_ID: &str = "first_object_id";
+/// Subgroup ID フィールドを送るモード (SUBGROUP_ID_MODE = 0b10)
+pub(crate) const SUBGROUP_ID_MODE_EXPLICIT: &str = "explicit";
+
 /// `buf` の先頭から vi64 をデコードし `(値, 消費バイト数)` を返す。
 ///
 /// バイト列が途中で切れている場合は `None` を返し、続きの到着を待つ。
@@ -1019,7 +1031,9 @@ pub(crate) struct CoreEvent {
     publisher_priority: Option<u8>,
     /// 受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
     ///
-    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` になる。
+    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでも、最初の
+    /// Object を受信した時点で確定した値が入る
+    /// (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
     subgroup_id: Option<u64>,
     /// 受信したメッセージのパラメータ。
     parameters: Option<Py<PyDict>>,
@@ -1252,8 +1266,9 @@ impl CoreEvent {
 
     /// 受信したオブジェクトを含む subgroup の Subgroup ID (object イベントのみ)。
     ///
-    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでは `None` に
-    /// なる (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    /// ヘッダが Subgroup ID を最初の Object ID として決めるモードでも、最初の
+    /// Object を受信した時点で確定した値が入る
+    /// (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
     #[getter]
     fn subgroup_id(&self) -> Option<u64> {
         self.subgroup_id
@@ -2178,6 +2193,13 @@ impl CoreSession {
                         acceptance,
                     ));
                     let header = self.data_headers.get(&stream_id).copied();
+                    // Subgroup ID を最初の Object ID として決めるモードでは、最初の
+                    // Object を受信した時点で確定する。ヘッダ受信直後は決まらないため
+                    // `None` のままになる
+                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+                    let subgroup_id = header
+                        .and_then(|info| info.subgroup_id)
+                        .or_else(|| decoder.resolved_subgroup_id());
                     events.push(CoreEvent::object(
                         Some(stream_id),
                         ObjectEventParts {
@@ -2189,7 +2211,7 @@ impl CoreSession {
                             status: object.status,
                             properties: object.properties_bytes.clone(),
                             publisher_priority: header.and_then(|info| info.publisher_priority),
-                            subgroup_id: header.and_then(|info| info.subgroup_id),
+                            subgroup_id,
                         },
                     ));
                 }
@@ -2924,7 +2946,12 @@ impl CoreSession {
     /// 送信する subgroup ストリームを登録する。
     ///
     /// 実際のバイト列は Python 側が組み立てるため、ここでは状態機械へ登録だけを行う。
-    #[pyo3(signature = (stream_id, request_id, track_alias, group_id, subgroup_id, publisher_priority=None, has_properties=false, end_of_group=false, first_object=false))]
+    ///
+    /// `subgroup_id_mode` は Subgroup ID のエンコードモードであり、`"zero"` /
+    /// `"first_object_id"` / `"explicit"` のいずれかである。Subgroup ID を最初の
+    /// Object ID として決めるモードでは `subgroup_id` を渡さない
+    /// (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    #[pyo3(signature = (stream_id, request_id, track_alias, group_id, subgroup_id=None, subgroup_id_mode="zero", publisher_priority=None, has_properties=false, end_of_group=false, first_object=false))]
     #[allow(clippy::too_many_arguments)]
     fn send_subgroup_header(
         &mut self,
@@ -2934,18 +2961,49 @@ impl CoreSession {
         track_alias: u64,
         group_id: u64,
         subgroup_id: Option<u64>,
+        subgroup_id_mode: &str,
         publisher_priority: Option<u8>,
         has_properties: bool,
         end_of_group: bool,
         first_object: bool,
     ) -> PyResult<Vec<CoreEvent>> {
+        // モードと Subgroup ID の食い違いは wire と状態機械が食い違う原因になるため、
+        // 送信前に拒否する
+        let subgroup_id = match subgroup_id_mode {
+            "zero" => {
+                if subgroup_id.is_some() {
+                    return Err(PyValueError::new_err(
+                        "subgroup_id must be omitted when subgroup_id_mode is zero",
+                    ));
+                }
+                SubgroupIdMode::Zero
+            }
+            "first_object_id" => {
+                if subgroup_id.is_some() {
+                    return Err(PyValueError::new_err(
+                        "subgroup_id must be omitted when subgroup_id_mode is first_object_id",
+                    ));
+                }
+                SubgroupIdMode::FirstObjectId
+            }
+            "explicit" => {
+                let Some(id) = subgroup_id else {
+                    return Err(PyValueError::new_err(
+                        "subgroup_id is required when subgroup_id_mode is explicit",
+                    ));
+                };
+                SubgroupIdMode::Explicit(id)
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown subgroup_id_mode: {other}"
+                )));
+            }
+        };
         let header = SubgroupHeader {
             track_alias,
             group_id,
-            subgroup_id: match subgroup_id {
-                Some(id) => SubgroupIdMode::Explicit(id),
-                None => SubgroupIdMode::Zero,
-            },
+            subgroup_id,
             publisher_priority,
             has_properties,
             end_of_group,

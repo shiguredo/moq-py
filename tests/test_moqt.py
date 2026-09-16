@@ -2082,3 +2082,204 @@ def test_goaway_rejects_a_new_session_uri_beyond_the_length_limit() -> None:
 
     with pytest.raises(RuntimeError, match="new_session_uri exceeds"):
         server.send_goaway(uri, 5000)
+
+
+# ─── Subgroup ID のエンコードモード ─────────────────────────
+
+
+def _received_subgroup_stream(
+    first_object_id: int,
+    payload: bytes,
+    *,
+    subgroup_id_mode: int,
+    subgroup_id: int | None = None,
+) -> bytes:
+    """受信側へ流し込む subgroup ストリームのバイト列を組み立てる。
+
+    Type Flags は PROPERTIES bit (0x01)、SUBGROUP_ID_MODE (bits 1-2、mask 0x06)、
+    END_OF_GROUP bit (0x08)、bit 4 (0x10、必須)、DEFAULT_PRIORITY bit (0x20)、
+    FIRST_OBJECT bit (0x40) から成る
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    # bit 4 は常に 1 であり、Publisher Priority を省略するため DEFAULT_PRIORITY bit を立てる
+    type_byte = 0x10 | 0x20 | subgroup_id_mode
+    data = bytearray()
+    data += encode_varint(type_byte)
+    data += encode_varint(1)
+    data += encode_varint(7)
+    if subgroup_id is not None:
+        data += encode_varint(subgroup_id)
+    # 最初の Object の Object ID Delta は Object ID そのものである
+    data += encode_varint(first_object_id)
+    data += encode_varint(len(payload))
+    data += payload
+    return bytes(data)
+
+
+def test_received_subgroup_resolves_the_subgroup_id_from_the_first_object() -> None:
+    """
+    Subgroup ID を最初の Object ID として決めるモードの受信を確認する。
+
+    ヘッダに Subgroup ID フィールドが無いため、ヘッダ受信直後は Subgroup ID が決まらず、
+    最初の Object を受信した時点で確定する
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    # SUBGROUP_ID_MODE = 0b01 (最初の Object ID が Subgroup ID)
+    stream = _received_subgroup_stream(9, b"resolved", subgroup_id_mode=0x02)
+
+    # ヘッダと Object を 1 度に渡すと、最初の Object の ID が Subgroup ID として載る
+    objects, events = client.receive_data_stream(2, stream, 0x10)
+    assert len(objects) == 1
+    accepted = [event for event in events if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].object_id == 9
+    assert accepted[0].subgroup_id == 9
+    assert accepted[0].data == b"resolved"
+
+
+def test_received_subgroup_header_alone_does_not_resolve_the_subgroup_id() -> None:
+    """
+    Object を受信する前は Subgroup ID が決まらないことを確認する。
+
+    SUBGROUP_ID_MODE が 0b01 のヘッダには Subgroup ID フィールドが無いため、最初の
+    Object を受信するまで Subgroup ID は確定しない
+    (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    # ヘッダだけを渡すと Object は 1 件も届かない
+    header = encode_varint(0x32) + encode_varint(1) + encode_varint(7)
+    objects, events = client.receive_data_stream(2, header, 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+
+    # ヘッダに続けて Object を渡すと Subgroup ID が確定する
+    payload = b"after-header"
+    object_data = encode_varint(9) + encode_varint(len(payload)) + payload
+    objects, events = client.receive_data_stream(2, object_data, None)
+    assert len(objects) == 1
+    accepted = [event for event in events if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].object_id == 9
+    assert accepted[0].subgroup_id == 9
+
+
+def test_received_subgroup_reports_an_explicit_subgroup_id_from_the_header() -> None:
+    """
+    Subgroup ID を明示するモードではヘッダの値がそのまま載ることを確認する。
+
+    SUBGROUP_ID_MODE が 0b10 のヘッダは Subgroup ID フィールドを持ち、Object の受信を
+    待たずに確定する (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    # SUBGROUP_ID_MODE = 0b10 (Subgroup ID フィールドが存在する)
+    stream = _received_subgroup_stream(0, b"explicit", subgroup_id_mode=0x04, subgroup_id=3)
+    objects, events = client.receive_data_stream(2, stream, 0x10)
+
+    assert len(objects) == 1
+    accepted = [event for event in events if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].subgroup_id == 3
+
+
+def test_send_subgroup_header_uses_the_first_object_id_mode() -> None:
+    """
+     Subgroup ID を最初の Object ID として決めるモードで送信できることを確認する。
+
+     このモードでは Subgroup ID フィールドを送らないため、ヘッダは Type Flags、
+     Track Alias、Group ID だけになる。状態機械は最初の Object の送信で Subgroup ID を
+    確定する (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    # client が PUBLISH で配信し、server が購読する経路で publisher 側の状態を作る
+    client, server = _setup()
+    events = client.send_publish([b"ns"], b"t", 1, {}, {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    reply = server.send_request_ok(request_id, {}, {})
+    client.receive_request_stream(4, _message_data(reply[0]), "local")
+
+    # SUBGROUP_ID_MODE = 0b01 でヘッダを登録する
+    sent = client.send_subgroup_header(
+        8,
+        request_id,
+        1,
+        7,
+        None,
+        moqt.SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+        None,
+        False,
+        False,
+        False,
+    )
+    assert [event.kind for event in sent] == []
+
+    # 最初の Object を送ると Subgroup ID が確定する
+    reply_events = client.send_subgroup_object(8, 9, None)
+    assert [event.kind for event in reply_events[1]] == []
+
+
+def test_send_subgroup_header_rejects_a_subgroup_id_in_the_first_object_id_mode() -> None:
+    """
+    Subgroup ID を渡しながら最初の Object ID モードを選べないことを確認する。
+
+    このモードのヘッダに Subgroup ID フィールドは無いため、値の指定は wire と状態機械の
+    食い違いになる (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+    """
+    client, server = _setup()
+    events = client.send_publish([b"ns"], b"t", 1, {}, {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    reply = server.send_request_ok(request_id, {}, {})
+    client.receive_request_stream(4, _message_data(reply[0]), "local")
+
+    with pytest.raises(ValueError, match="subgroup_id must be omitted"):
+        client.send_subgroup_header(
+            8,
+            request_id,
+            1,
+            7,
+            3,
+            moqt.SUBGROUP_ID_MODE_FIRST_OBJECT_ID,
+            None,
+            False,
+            False,
+            False,
+        )
+
+    # Subgroup ID を省略しながら明示モードを選ぶこともできない
+    with pytest.raises(ValueError, match="subgroup_id is required"):
+        client.send_subgroup_header(
+            8,
+            request_id,
+            1,
+            7,
+            None,
+            moqt.SUBGROUP_ID_MODE_EXPLICIT,
+            None,
+            False,
+            False,
+            False,
+        )
+
+    # 未知のモードは受け付けない
+    with pytest.raises(ValueError, match="unknown subgroup_id_mode"):
+        client.send_subgroup_header(
+            8,
+            request_id,
+            1,
+            7,
+            None,
+            "reserved",
+            None,
+            False,
+            False,
+            False,
+        )

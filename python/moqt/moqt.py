@@ -179,6 +179,17 @@ OBJECT_STATUS_END_OF_GROUP: int = _native.OBJECT_STATUS_END_OF_GROUP
 OBJECT_STATUS_END_OF_TRACK: int = _native.OBJECT_STATUS_END_OF_TRACK
 """指定した Location 以降のオブジェクトが存在しない。"""
 
+# Subgroup Header の SUBGROUP_ID_MODE (bits 1-2、mask 0x06)
+# (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+SUBGROUP_ID_MODE_ZERO: str = _native.SUBGROUP_ID_MODE_ZERO
+"""Subgroup ID を 0 に固定するモード (SUBGROUP_ID_MODE = 0b00)。"""
+
+SUBGROUP_ID_MODE_FIRST_OBJECT_ID: str = _native.SUBGROUP_ID_MODE_FIRST_OBJECT_ID
+"""最初の Object ID を Subgroup ID にするモード (SUBGROUP_ID_MODE = 0b01)。"""
+
+SUBGROUP_ID_MODE_EXPLICIT: str = _native.SUBGROUP_ID_MODE_EXPLICIT
+"""Subgroup ID フィールドを送るモード (SUBGROUP_ID_MODE = 0b10)。"""
+
 # データグラムの合計サイズの目安。
 #
 # QUIC は 1200 バイトの UDP データグラムを必ず運べることを要求する
@@ -406,6 +417,9 @@ __all__ = [
     "STREAM_SESSION_CLOSED",
     "STREAM_TOO_FAR_BEHIND",
     "STREAM_UNKNOWN_OBJECT_STATUS",
+    "SUBGROUP_ID_MODE_EXPLICIT",
+    "SUBGROUP_ID_MODE_FIRST_OBJECT_ID",
+    "SUBGROUP_ID_MODE_ZERO",
     "Event",
     "LocationFilter",
     "LocationFilterUpdate",
