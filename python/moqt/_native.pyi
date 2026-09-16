@@ -7,6 +7,127 @@ from collections.abc import Sequence
 from typing import Any, final
 
 @final
+class Accessibility:
+    """
+    MSF の accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))。
+    
+    [`Track::accessibility`] に設定する。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, scheme: str, value: str) -> Accessibility:
+        """
+        accessibility 記述子を組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def scheme(self, /) -> str:
+        """
+        記述子 scheme。
+        """
+    @scheme.setter
+    def scheme(self, /, value: str) -> None:
+        """
+        記述子 scheme。
+        """
+    @property
+    def value(self, /) -> str:
+        """
+        記述子値。
+        """
+    @value.setter
+    def value(self, /, value: str) -> None:
+        """
+        記述子値。
+        """
+
+@final
+class AuthInfo:
+    """
+    MSF の認可情報エントリ (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+    
+    [`Track::auth_info`] に設定する。`value` は scheme 固有の JSON 値そのものであり、
+    UTF-8 の生 JSON バイト列として渡す。単独の JSON 値でない場合は encode 時に
+    `ValueError` になる。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, scheme: str, value: Sequence[int]) -> AuthInfo:
+        """
+        認可情報エントリを組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def scheme(self, /) -> str:
+        """
+        認可 scheme 名。
+        """
+    @scheme.setter
+    def scheme(self, /, value: str) -> None:
+        """
+        認可 scheme 名。
+        """
+    @property
+    def value(self, /) -> bytes:
+        """
+        scheme 固有値の生 JSON。
+        """
+    @value.setter
+    def value(self, /, value: Sequence[int]) -> None:
+        """
+        scheme 固有値の生 JSON。
+        """
+
+@final
+class Buffers:
+    """
+    MSF のターゲットバッファ (draft-ietf-moq-msf-01 §5.2.9 (Buffers))。
+    
+    [`Track::buffers`] に設定する。draft は target / min / max を省略可能な
+    フィールドとして定義する。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, target: int |None = None, min: int |None = None, max: int |None = None) -> Buffers:
+        """
+        バッファを組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def max(self, /) -> int |None:
+        """
+        最大バッファ (ms)。
+        """
+    @max.setter
+    def max(self, /, value: int |None) -> None:
+        """
+        最大バッファ (ms)。
+        """
+    @property
+    def min(self, /) -> int |None:
+        """
+        最小バッファ (ms)。
+        """
+    @min.setter
+    def min(self, /, value: int |None) -> None:
+        """
+        最小バッファ (ms)。
+        """
+    @property
+    def target(self, /) -> int |None:
+        """
+        目標バッファ (ms)。
+        """
+    @target.setter
+    def target(self, /, value: int |None) -> None:
+        """
+        目標バッファ (ms)。
+        """
+
+@final
 class Catalog:
     """
     MSF カタログ。
@@ -23,6 +144,27 @@ class Catalog:
         空になる。
         """
     def __repr__(self, /) -> str: ...
+    def add_init_data(self, /, init_data: InitData) -> None:
+        """
+        初期化データを `initDataList` へ追加する
+        (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))。
+        
+        トラックの `init_ref` が指す id をここで登録する。登録の無い id を指す
+        `init_ref` は encode 時に `ValueError` になる。
+        """
+    def add_publish_track(self, /, track: Track) -> None:
+        """
+        トラックを `publishTracks` へ追加する
+        (draft-ietf-moq-msf-01 §5.1.5 (Publish tracks))。
+        """
+    def add_track(self, /, track: Track) -> None:
+        """
+        トラックを `tracks` へ追加する。
+        
+        draft の MUST に照らした検証は encode 時に行う。`packaging` が draft
+        §5.2.4 の許容値でない場合と、トラックのフィールドの型が合わない場合は
+        この時点で `ValueError` になる。
+        """
     def apply_delta(self, /, text: str, namespace: str |None = None) -> None:
         """
         delta 更新をこのカタログへ適用する。
@@ -33,6 +175,13 @@ class Catalog:
         操作は配列順に適用される。途中で失敗した場合、それまでの操作は取り消されない
         (draft-ietf-moq-msf-01 §5.1.6)。差し替え前の状態を保ちたい場合は、適用前に
         呼び出し側でカタログを複製すること。
+        """
+    def apply_delta_update(self, /, delta: DeltaUpdate, namespace: str |None = None) -> None:
+        """
+        [`DeltaUpdate`] が組み立てた delta 更新をこのカタログへ適用する。
+        
+        適用規則は [`Catalog::apply_delta`] と同じである。JSON 文字列を経由せずに
+        組み立てた操作を適用する場合に使う。
         """
     @staticmethod
     def decode(data: bytes) -> Catalog:
@@ -53,6 +202,11 @@ class Catalog:
         """
         カタログ生成時刻 (ms) (draft-ietf-moq-msf-01 §5.1.2)。
         """
+    @generated_at.setter
+    def generated_at(self, /, value: int |None) -> None:
+        """
+        カタログ生成時刻 (ms) を設定する (draft-ietf-moq-msf-01 §5.1.2)。
+        """
     @property
     def init_data_list(self, /) -> Any:
         """
@@ -62,6 +216,13 @@ class Catalog:
     def is_complete(self, /) -> bool:
         """
         ブロードキャストが完了しているか (draft-ietf-moq-msf-01 §5.1.3)。
+        """
+    @is_complete.setter
+    def is_complete(self, /, value: bool) -> None:
+        """
+        ブロードキャストが完了しているかを設定する (draft-ietf-moq-msf-01 §5.1.3)。
+        
+        真にすると、それ以降の delta 更新によるトラックの追加と複製が拒否される。
         """
     @staticmethod
     def parse(text: str) -> Catalog:
@@ -87,14 +248,482 @@ class Catalog:
         """
 
 @final
+class CloneTrack:
+    """
+    MSF の delta 更新が複製するトラック定義
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update) の clone 操作)。
+    
+    親トラックの属性を継承し、再定義した属性だけを上書きする。指定しなかった属性は
+    親から継承されるため、[`Track`] と違ってすべての属性が省略可能である。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, name: str, parent_name: str) -> CloneTrack:
+        """
+        複製するトラックを組み立てる。
+        
+        `name` と `parent_name` だけが必須であり、残りは属性で設定する。設定しなかった
+        属性は親トラックから継承される。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def accessibility(self, /) -> list[Accessibility] |None:
+        """
+        accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))。
+        """
+    @accessibility.setter
+    def accessibility(self, /, value: Sequence[Accessibility] |None) -> None:
+        """
+        accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))。
+        """
+    @property
+    def alt_group(self, /) -> int |None:
+        """
+        オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))。
+        """
+    @alt_group.setter
+    def alt_group(self, /, value: int |None) -> None:
+        """
+        オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))。
+        """
+    @property
+    def auth_info(self, /) -> list[AuthInfo] |None:
+        """
+        認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+        """
+    @auth_info.setter
+    def auth_info(self, /, value: Sequence[AuthInfo] |None) -> None:
+        """
+        認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+        """
+    @property
+    def avg_bitrate(self, /) -> int |None:
+        """
+        平均ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))。
+        """
+    @avg_bitrate.setter
+    def avg_bitrate(self, /, value: int |None) -> None:
+        """
+        平均ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))。
+        """
+    @property
+    def bitrate(self, /) -> int |None:
+        """
+        最大ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))。
+        """
+    @bitrate.setter
+    def bitrate(self, /, value: int |None) -> None:
+        """
+        最大ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))。
+        """
+    @property
+    def buffers(self, /) -> Buffers |None:
+        """
+        ターゲットバッファ (draft-ietf-moq-msf-01 §5.2.9 (Buffers))。
+        """
+    @buffers.setter
+    def buffers(self, /, value: Buffers |None) -> None:
+        """
+        ターゲットバッファ (draft-ietf-moq-msf-01 §5.2.9 (Buffers))。
+        """
+    @property
+    def channel_config(self, /) -> str |None:
+        """
+        チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))。
+        """
+    @channel_config.setter
+    def channel_config(self, /, value: str |None) -> None:
+        """
+        チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))。
+        """
+    @property
+    def cipher_suite(self, /) -> str |None:
+        """
+        暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))。
+        """
+    @cipher_suite.setter
+    def cipher_suite(self, /, value: str |None) -> None:
+        """
+        暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))。
+        """
+    @property
+    def codec(self, /) -> str |None:
+        """
+        コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))。
+        """
+    @codec.setter
+    def codec(self, /, value: str |None) -> None:
+        """
+        コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))。
+        """
+    @property
+    def connection_uri(self, /) -> str |None:
+        """
+        接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))。
+        """
+    @connection_uri.setter
+    def connection_uri(self, /, value: str |None) -> None:
+        """
+        接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))。
+        """
+    @property
+    def depends(self, /) -> list[str] |None:
+        """
+        依存トラック名 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))。省略時は親から継承する。
+        """
+    @depends.setter
+    def depends(self, /, value: Sequence[str] |None) -> None:
+        """
+        依存トラック名 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))。省略時は親から継承する。
+        """
+    @property
+    def display_height(self, /) -> int |None:
+        """
+        表示高さ (px) (draft-ietf-moq-msf-01 §5.2.31 (Display height))。
+        """
+    @display_height.setter
+    def display_height(self, /, value: int |None) -> None:
+        """
+        表示高さ (px) (draft-ietf-moq-msf-01 §5.2.31 (Display height))。
+        """
+    @property
+    def display_width(self, /) -> int |None:
+        """
+        表示幅 (px) (draft-ietf-moq-msf-01 §5.2.30 (Display width))。
+        """
+    @display_width.setter
+    def display_width(self, /, value: int |None) -> None:
+        """
+        表示幅 (px) (draft-ietf-moq-msf-01 §5.2.30 (Display width))。
+        """
+    @property
+    def encryption_scheme(self, /) -> str |None:
+        """
+        暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))。
+        """
+    @encryption_scheme.setter
+    def encryption_scheme(self, /, value: str |None) -> None:
+        """
+        暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))。
+        """
+    @property
+    def event_type(self, /) -> str |None:
+        """
+        イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))。
+        """
+    @event_type.setter
+    def event_type(self, /, value: str |None) -> None:
+        """
+        イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))。
+        """
+    @property
+    def framerate(self, /) -> float |None:
+        """
+        フレームレート (fps) (draft-ietf-moq-msf-01 §5.2.20 (Framerate))。
+        """
+    @framerate.setter
+    def framerate(self, /, value: float |None) -> None:
+        """
+        フレームレート (fps) (draft-ietf-moq-msf-01 §5.2.20 (Framerate))。
+        """
+    @property
+    def height(self, /) -> int |None:
+        """
+        エンコード高さ (px) (draft-ietf-moq-msf-01 §5.2.27 (Height))。
+        """
+    @height.setter
+    def height(self, /, value: int |None) -> None:
+        """
+        エンコード高さ (px) (draft-ietf-moq-msf-01 §5.2.27 (Height))。
+        """
+    @property
+    def init_ref(self, /) -> str |None:
+        """
+        初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))。
+        """
+    @init_ref.setter
+    def init_ref(self, /, value: str |None) -> None:
+        """
+        初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))。
+        """
+    @property
+    def is_live(self, /) -> bool |None:
+        """
+        ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live))。省略時は親から継承する。
+        """
+    @is_live.setter
+    def is_live(self, /, value: bool |None) -> None:
+        """
+        ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live))。省略時は親から継承する。
+        """
+    @property
+    def key_id(self, /) -> str |None:
+        """
+        鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))。
+        """
+    @key_id.setter
+    def key_id(self, /, value: str |None) -> None:
+        """
+        鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))。
+        """
+    @property
+    def label(self, /) -> str |None:
+        """
+        トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))。
+        """
+    @label.setter
+    def label(self, /, value: str |None) -> None:
+        """
+        トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))。
+        """
+    @property
+    def lang(self, /) -> str |None:
+        """
+        言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))。
+        """
+    @lang.setter
+    def lang(self, /, value: str |None) -> None:
+        """
+        言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))。
+        """
+    @property
+    def max_gop_duration(self, /) -> int |None:
+        """
+        最大 GOP 長 (ms) (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))。
+        """
+    @max_gop_duration.setter
+    def max_gop_duration(self, /, value: int |None) -> None:
+        """
+        最大 GOP 長 (ms) (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))。
+        """
+    @property
+    def max_group_duration(self, /) -> int |None:
+        """
+        最大 Group 長 (ms) (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))。
+        """
+    @max_group_duration.setter
+    def max_group_duration(self, /, value: int |None) -> None:
+        """
+        最大 Group 長 (ms) (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))。
+        """
+    @property
+    def mime_type(self, /) -> str |None:
+        """
+        MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))。
+        """
+    @mime_type.setter
+    def mime_type(self, /, value: str |None) -> None:
+        """
+        MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))。
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        新しいトラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name))。必須。
+        """
+    @name.setter
+    def name(self, /, value: str) -> None:
+        """
+        新しいトラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name))。必須。
+        """
+    @property
+    def namespace(self, /) -> str |None:
+        """
+        トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+        """
+    @namespace.setter
+    def namespace(self, /, value: str |None) -> None:
+        """
+        トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+        """
+    @property
+    def packaging(self, /) -> str |None:
+        """
+        パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))。省略時は親から継承する。
+        """
+    @packaging.setter
+    def packaging(self, /, value: str |None) -> None:
+        """
+        パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))。省略時は親から継承する。
+        """
+    @property
+    def parent_name(self, /) -> str:
+        """
+        親トラック名 (draft-ietf-moq-msf-01 §5.2.33 (Parent name))。必須。
+        """
+    @parent_name.setter
+    def parent_name(self, /, value: str) -> None:
+        """
+        親トラック名 (draft-ietf-moq-msf-01 §5.2.33 (Parent name))。必須。
+        """
+    @property
+    def parent_namespace(self, /) -> str |None:
+        """
+        親トラックネームスペース (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))。
+        
+        省略した場合はカタログのネームスペースを継承したものとして解決される。
+        """
+    @parent_namespace.setter
+    def parent_namespace(self, /, value: str |None) -> None:
+        """
+        親トラックネームスペース (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))。
+        
+        省略した場合はカタログのネームスペースを継承したものとして解決される。
+        """
+    @property
+    def render_group(self, /) -> int |None:
+        """
+        レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+        """
+    @render_group.setter
+    def render_group(self, /, value: int |None) -> None:
+        """
+        レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+        """
+    @property
+    def role(self, /) -> str |None:
+        """
+        トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))。
+        """
+    @role.setter
+    def role(self, /, value: str |None) -> None:
+        """
+        トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))。
+        """
+    @property
+    def samplerate(self, /) -> int |None:
+        """
+        オーディオサンプルレート (Hz) (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))。
+        """
+    @samplerate.setter
+    def samplerate(self, /, value: int |None) -> None:
+        """
+        オーディオサンプルレート (Hz) (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))。
+        """
+    @property
+    def spatial_id(self, /) -> int |None:
+        """
+        スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))。
+        """
+    @spatial_id.setter
+    def spatial_id(self, /, value: int |None) -> None:
+        """
+        スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))。
+        """
+    @property
+    def target_latency(self, /) -> int |None:
+        """
+        ターゲットレイテンシ (ms) (draft-ietf-moq-msf-01 §5.2.8 (Target latency))。
+        """
+    @target_latency.setter
+    def target_latency(self, /, value: int |None) -> None:
+        """
+        ターゲットレイテンシ (ms) (draft-ietf-moq-msf-01 §5.2.8 (Target latency))。
+        """
+    @property
+    def template(self, /) -> Template |None:
+        """
+        メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))。
+        """
+    @template.setter
+    def template(self, /, value: Template |None) -> None:
+        """
+        メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))。
+        """
+    @property
+    def temporal_id(self, /) -> int |None:
+        """
+        テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))。
+        """
+    @temporal_id.setter
+    def temporal_id(self, /, value: int |None) -> None:
+        """
+        テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))。
+        """
+    @property
+    def timescale(self, /) -> int |None:
+        """
+        タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))。
+        """
+    @timescale.setter
+    def timescale(self, /, value: int |None) -> None:
+        """
+        タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))。
+        """
+    @property
+    def token(self, /) -> str |None:
+        """
+        認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))。
+        """
+    @token.setter
+    def token(self, /, value: str |None) -> None:
+        """
+        認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))。
+        """
+    @property
+    def track_base_key(self, /) -> str |None:
+        """
+        track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))。
+        """
+    @track_base_key.setter
+    def track_base_key(self, /, value: str |None) -> None:
+        """
+        track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))。
+        """
+    @property
+    def track_duration(self, /) -> int |None:
+        """
+        トラック長 (ms) (draft-ietf-moq-msf-01 §5.2.35 (Track duration))。
+        """
+    @track_duration.setter
+    def track_duration(self, /, value: int |None) -> None:
+        """
+        トラック長 (ms) (draft-ietf-moq-msf-01 §5.2.35 (Track duration))。
+        """
+    @property
+    def width(self, /) -> int |None:
+        """
+        エンコード幅 (px) (draft-ietf-moq-msf-01 §5.2.26 (Width))。
+        """
+    @width.setter
+    def width(self, /, value: int |None) -> None:
+        """
+        エンコード幅 (px) (draft-ietf-moq-msf-01 §5.2.26 (Width))。
+        """
+
+@final
 class DeltaUpdate:
     """
     MSF の delta 更新。
     
-    draft-ietf-moq-msf-01 §5.1.6 (Delta update) の文書である。
+    draft-ietf-moq-msf-01 §5.1.6 (Delta update) の文書である。JSON から読み込むほかに、
+    [`DeltaUpdate::add_tracks`] / [`DeltaUpdate::remove_tracks`] /
+    [`DeltaUpdate::clone_tracks`] で操作列を組み立てられる。
     """
     def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /) -> DeltaUpdate:
+        """
+        空の delta 更新を作成する。
+        
+        操作を持たない delta 更新は draft §5.3 が許さないため、そのまま encode すると
+        `ValueError` になる。少なくとも 1 つの操作を追加すること。
+        """
     def __repr__(self, /) -> str: ...
+    def add_tracks(self, /, tracks: Sequence[Track]) -> None:
+        """
+        トラックを追加する操作 ("add") を操作列の末尾へ追加する
+        (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+        
+        操作は配列順に適用されるため、追加した順が適用順になる。
+        """
+    def clone_tracks(self, /, tracks: Sequence[CloneTrack]) -> None:
+        """
+        トラックを複製する操作 ("clone") を操作列の末尾へ追加する
+        (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+        
+        複製は親トラックの属性を継承し、再定義した属性だけを上書きする。
+        """
     @staticmethod
     def decode(data: bytes) -> DeltaUpdate:
         """
@@ -105,11 +734,18 @@ class DeltaUpdate:
     def encode(self, /) -> bytes:
         """
         delta 更新を JSON バイト列へ書き出す。
+        
+        書き出す前に draft の MUST を検証する。手組みの不正な値は `ValueError` になる。
         """
     @property
     def generated_at(self, /) -> int |None:
         """
         カタログ生成時刻 (ms) (draft-ietf-moq-msf-01 §5.1.6)。
+        """
+    @generated_at.setter
+    def generated_at(self, /, value: int |None) -> None:
+        """
+        カタログ生成時刻 (ms) を設定する (draft-ietf-moq-msf-01 §5.1.6)。
         """
     @property
     def operations(self, /) -> Any:
@@ -122,6 +758,11 @@ class DeltaUpdate:
     def parse(text: str) -> DeltaUpdate:
         """
         JSON 文字列から delta 更新を読み込む。
+        """
+    def remove_tracks(self, /, tracks: Sequence[RemoveTrack]) -> None:
+        """
+        トラックを削除する操作 ("remove") を操作列の末尾へ追加する
+        (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
         """
 
 @final
@@ -290,6 +931,42 @@ class EventTimeline:
     def entries(self, /) -> Any:
         """
         エントリ列を draft のフィールド名を持つ辞書のリストとして返す。
+        """
+
+@final
+class InitData:
+    """
+    MSF の初期化データエントリ (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))。
+    
+    [`Catalog::add_init_data`] で登録する。draft が定める `type` は現状 `inline`
+    (Base64 [RFC 4648] で符号化した初期化データ) だけであり、JSON へは常に `inline`
+    として書き出す。この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, id: str, data: str) -> InitData:
+        """
+        初期化データを組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def data(self, /) -> str:
+        """
+        Base64 で符号化した初期化データ。
+        """
+    @data.setter
+    def data(self, /, value: str) -> None:
+        """
+        Base64 で符号化した初期化データ。
+        """
+    @property
+    def id(self, /) -> str:
+        """
+        カタログ内で一意な id。
+        """
+    @id.setter
+    def id(self, /, value: str) -> None:
+        """
+        カタログ内で一意な id。
         """
 
 @final
@@ -594,6 +1271,45 @@ class ObjectPropertiesIterator:
     def __repr__(self, /) -> str: ...
 
 @final
+class RemoveTrack:
+    """
+    カタログから削除するトラックの参照
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update) の remove 操作)。
+    
+    draft はトラック名と任意のネームスペースだけを持つ参照を定める。ネームスペースを
+    省略した場合はカタログトラックのネームスペースを継承したものとして解決される
+    (§5.2.2 (Track namespace))。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, name: str, namespace: str |None = None) -> RemoveTrack:
+        """
+        削除するトラックの参照を組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def name(self, /) -> str:
+        """
+        削除するトラック名。
+        """
+    @name.setter
+    def name(self, /, value: str) -> None:
+        """
+        削除するトラック名。
+        """
+    @property
+    def namespace(self, /) -> str |None:
+        """
+        削除するトラックのネームスペース。
+        """
+    @namespace.setter
+    def namespace(self, /, value: str |None) -> None:
+        """
+        削除するトラックのネームスペース。
+        """
+
+@final
 class Session:
     """
     1 本の MoQT Transport Session に対応する sans I/O セッション状態機械。
@@ -891,6 +1607,553 @@ class Session:
     def tick(self, /, now_ms: int) -> list[Event]:
         """
         時間を進めてタイムアウトを判定する。
+        """
+
+@final
+class Template:
+    """
+    MSF のメディアタイムラインテンプレート
+    (draft-ietf-moq-msf-01 §5.2.15 (Template) / §7.4.1 (Template Format))。
+    
+    [`Track::template`] に設定する。8 つの値は JSON では 6 要素の配列であり、
+    `[start_media_time, delta_media_time, [start_group_id, start_object_id],
+    [delta_group_id, delta_object_id], start_wallclock, delta_wallclock]` の順に並ぶ。
+    n 番目のエントリの計算式は群のフィールドから
+    [`Template::resolve_entry`] で求める。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, start_media_time: int, delta_media_time: int, start_group_id: int, start_object_id: int, delta_group_id: int, delta_object_id: int, start_wallclock: int, delta_wallclock: int) -> Template:
+        """
+        テンプレートを組み立てる。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def delta_group_id(self, /) -> int:
+        """
+        Group ID の増分。
+        """
+    @delta_group_id.setter
+    def delta_group_id(self, /, value: int) -> None:
+        """
+        Group ID の増分。
+        """
+    @property
+    def delta_media_time(self, /) -> int:
+        """
+        メディア時刻の増分 (ms)。
+        """
+    @delta_media_time.setter
+    def delta_media_time(self, /, value: int) -> None:
+        """
+        メディア時刻の増分 (ms)。
+        """
+    @property
+    def delta_object_id(self, /) -> int:
+        """
+        Object ID の増分。
+        """
+    @delta_object_id.setter
+    def delta_object_id(self, /, value: int) -> None:
+        """
+        Object ID の増分。
+        """
+    @property
+    def delta_wallclock(self, /) -> int:
+        """
+        ウォールクロックの増分 (ms)。
+        """
+    @delta_wallclock.setter
+    def delta_wallclock(self, /, value: int) -> None:
+        """
+        ウォールクロックの増分 (ms)。
+        """
+    def resolve_entry(self, /, n: int) -> tuple[int, int, int, int] |None:
+        """
+        n 番目 (0 始まり) のエントリを `(pts_ms, group_id, object_id, wallclock_ms)` として返す。
+        
+        draft-ietf-moq-msf-01 §7.4.1 の計算式に従う。4 系列のいずれかが overflow する
+        場合は `None` を返す。この仕様は draft 由来であり、将来の改訂で変更される
+        可能性がある。
+        """
+    @property
+    def start_group_id(self, /) -> int:
+        """
+        開始 Group ID。
+        """
+    @start_group_id.setter
+    def start_group_id(self, /, value: int) -> None:
+        """
+        開始 Group ID。
+        """
+    @property
+    def start_media_time(self, /) -> int:
+        """
+        開始メディア時刻 (ms)。
+        """
+    @start_media_time.setter
+    def start_media_time(self, /, value: int) -> None:
+        """
+        開始メディア時刻 (ms)。
+        """
+    @property
+    def start_object_id(self, /) -> int:
+        """
+        開始 Object ID。
+        """
+    @start_object_id.setter
+    def start_object_id(self, /, value: int) -> None:
+        """
+        開始 Object ID。
+        """
+    @property
+    def start_wallclock(self, /) -> int:
+        """
+        開始ウォールクロック (ms)。
+        """
+    @start_wallclock.setter
+    def start_wallclock(self, /, value: int) -> None:
+        """
+        開始ウォールクロック (ms)。
+        """
+
+@final
+class Track:
+    """
+    MSF のトラックオブジェクト (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))。
+    
+    カタログの `tracks` / `publishTracks` と、delta 更新の add 操作が運ぶトラック 1 件で
+    ある。JSON のフィールド名を snake_case にした属性を持つ。
+    
+    `packaging` は draft §5.2.4 (Packaging) が定める `loc` / `mediatimeline` /
+    `eventtimeline` / `moqlog` / `moqmetrics` のいずれかである。それ以外の値を
+    [`Catalog::add_track`] や [`DeltaUpdate::add_tracks`] へ渡すと `ValueError` になる。
+    draft の MUST 違反 (eventType と packaging の組み合わせ、targetLatency と buffers の
+    共存、mediatimeline / eventtimeline の depends と mimeType など) は encode 時に
+    `ValueError` になる。
+    
+    この仕様は draft 由来であり、将来の改訂で変更される可能性がある。
+    """
+    def __eq__(self, other: object, /) -> bool: ...
+    def __new__(cls, /, name: str, packaging: str, is_live: bool) -> Track:
+        """
+        トラックを組み立てる。
+        
+        `name` / `packaging` / `is_live` だけが必須であり、残りは属性で設定する。
+        """
+    def __repr__(self, /) -> str: ...
+    @property
+    def accessibility(self, /) -> list[Accessibility]:
+        """
+        accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))。
+        """
+    @accessibility.setter
+    def accessibility(self, /, value: Sequence[Accessibility]) -> None:
+        """
+        accessibility 記述子 (draft-ietf-moq-msf-01 §5.2.44 (Accessibility))。
+        """
+    @property
+    def alt_group(self, /) -> int |None:
+        """
+        オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))。
+        """
+    @alt_group.setter
+    def alt_group(self, /, value: int |None) -> None:
+        """
+        オルタネートグループ (draft-ietf-moq-msf-01 §5.2.12 (Alternate group))。
+        """
+    @property
+    def auth_info(self, /) -> list[AuthInfo] |None:
+        """
+        認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+        """
+    @auth_info.setter
+    def auth_info(self, /, value: Sequence[AuthInfo] |None) -> None:
+        """
+        認可情報 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+        """
+    @property
+    def avg_bitrate(self, /) -> int |None:
+        """
+        平均ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))。
+        """
+    @avg_bitrate.setter
+    def avg_bitrate(self, /, value: int |None) -> None:
+        """
+        平均ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.23 (Average Bitrate))。
+        """
+    @property
+    def bitrate(self, /) -> int |None:
+        """
+        最大ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))。
+        """
+    @bitrate.setter
+    def bitrate(self, /, value: int |None) -> None:
+        """
+        最大ビットレート (bps) (draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate))。
+        """
+    @property
+    def buffers(self, /) -> Buffers |None:
+        """
+        ターゲットバッファ (draft-ietf-moq-msf-01 §5.2.9 (Buffers))。
+        
+        `target_latency` と同時には指定できない。
+        """
+    @buffers.setter
+    def buffers(self, /, value: Buffers |None) -> None:
+        """
+        ターゲットバッファ (draft-ietf-moq-msf-01 §5.2.9 (Buffers))。
+        
+        `target_latency` と同時には指定できない。
+        """
+    @property
+    def channel_config(self, /) -> str |None:
+        """
+        チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))。
+        """
+    @channel_config.setter
+    def channel_config(self, /, value: str |None) -> None:
+        """
+        チャンネル設定 (draft-ietf-moq-msf-01 §5.2.29 (Channel configuration))。
+        """
+    @property
+    def cipher_suite(self, /) -> str |None:
+        """
+        暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))。
+        """
+    @cipher_suite.setter
+    def cipher_suite(self, /, value: str |None) -> None:
+        """
+        暗号スイート (draft-ietf-moq-msf-01 §5.2.39 (Cipher Suite))。
+        """
+    @property
+    def codec(self, /) -> str |None:
+        """
+        コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))。
+        """
+    @codec.setter
+    def codec(self, /, value: str |None) -> None:
+        """
+        コーデック (draft-ietf-moq-msf-01 §5.2.18 (Codec))。
+        """
+    @property
+    def connection_uri(self, /) -> str |None:
+        """
+        接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))。
+        """
+    @connection_uri.setter
+    def connection_uri(self, /, value: str |None) -> None:
+        """
+        接続先 URI (draft-ietf-moq-msf-01 §5.2.36 (Connection URI))。
+        """
+    @property
+    def depends(self, /) -> list[str]:
+        """
+        依存トラック名 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))。
+        """
+    @depends.setter
+    def depends(self, /, value: Sequence[str]) -> None:
+        """
+        依存トラック名 (draft-ietf-moq-msf-01 §5.2.14 (Dependencies))。
+        """
+    @property
+    def display_height(self, /) -> int |None:
+        """
+        表示高さ (px) (draft-ietf-moq-msf-01 §5.2.31 (Display height))。
+        """
+    @display_height.setter
+    def display_height(self, /, value: int |None) -> None:
+        """
+        表示高さ (px) (draft-ietf-moq-msf-01 §5.2.31 (Display height))。
+        """
+    @property
+    def display_width(self, /) -> int |None:
+        """
+        表示幅 (px) (draft-ietf-moq-msf-01 §5.2.30 (Display width))。
+        """
+    @display_width.setter
+    def display_width(self, /, value: int |None) -> None:
+        """
+        表示幅 (px) (draft-ietf-moq-msf-01 §5.2.30 (Display width))。
+        """
+    @property
+    def encryption_scheme(self, /) -> str |None:
+        """
+        暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))。
+        """
+    @encryption_scheme.setter
+    def encryption_scheme(self, /, value: str |None) -> None:
+        """
+        暗号化方式 (draft-ietf-moq-msf-01 §5.2.38 (Encryption Scheme))。
+        """
+    @property
+    def event_type(self, /) -> str |None:
+        """
+        イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))。
+        """
+    @event_type.setter
+    def event_type(self, /, value: str |None) -> None:
+        """
+        イベントタイムラインタイプ (draft-ietf-moq-msf-01 §5.2.5 (Event timeline type))。
+        """
+    @property
+    def framerate(self, /) -> float |None:
+        """
+        フレームレート (fps) (draft-ietf-moq-msf-01 §5.2.20 (Framerate))。
+        """
+    @framerate.setter
+    def framerate(self, /, value: float |None) -> None:
+        """
+        フレームレート (fps) (draft-ietf-moq-msf-01 §5.2.20 (Framerate))。
+        """
+    @property
+    def height(self, /) -> int |None:
+        """
+        エンコード高さ (px) (draft-ietf-moq-msf-01 §5.2.27 (Height))。
+        """
+    @height.setter
+    def height(self, /, value: int |None) -> None:
+        """
+        エンコード高さ (px) (draft-ietf-moq-msf-01 §5.2.27 (Height))。
+        """
+    @property
+    def init_ref(self, /) -> str |None:
+        """
+        初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))。
+        """
+    @init_ref.setter
+    def init_ref(self, /, value: str |None) -> None:
+        """
+        初期化データ参照 (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))。
+        """
+    @property
+    def is_live(self, /) -> bool:
+        """
+        ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live))。必須。
+        """
+    @is_live.setter
+    def is_live(self, /, value: bool) -> None:
+        """
+        ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live))。必須。
+        """
+    @property
+    def key_id(self, /) -> str |None:
+        """
+        鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))。
+        """
+    @key_id.setter
+    def key_id(self, /, value: str |None) -> None:
+        """
+        鍵識別子 (draft-ietf-moq-msf-01 §5.2.40 (Key ID))。
+        """
+    @property
+    def label(self, /) -> str |None:
+        """
+        トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))。
+        """
+    @label.setter
+    def label(self, /, value: str |None) -> None:
+        """
+        トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))。
+        """
+    @property
+    def lang(self, /) -> str |None:
+        """
+        言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))。
+        """
+    @lang.setter
+    def lang(self, /, value: str |None) -> None:
+        """
+        言語タグ (draft-ietf-moq-msf-01 §5.2.32 (Language))。
+        """
+    @property
+    def max_gop_duration(self, /) -> int |None:
+        """
+        最大 GOP 長 (ms) (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))。
+        """
+    @max_gop_duration.setter
+    def max_gop_duration(self, /, value: int |None) -> None:
+        """
+        最大 GOP 長 (ms) (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration))。
+        """
+    @property
+    def max_group_duration(self, /) -> int |None:
+        """
+        最大 Group 長 (ms) (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))。
+        """
+    @max_group_duration.setter
+    def max_group_duration(self, /, value: int |None) -> None:
+        """
+        最大 Group 長 (ms) (draft-ietf-moq-msf-01 §5.2.25 (Maximum Group Duration))。
+        """
+    @property
+    def mime_type(self, /) -> str |None:
+        """
+        MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))。
+        """
+    @mime_type.setter
+    def mime_type(self, /, value: str |None) -> None:
+        """
+        MIME タイプ (draft-ietf-moq-msf-01 §5.2.19 (Mimetype))。
+        """
+    @property
+    def name(self, /) -> str:
+        """
+        トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name))。必須。
+        """
+    @name.setter
+    def name(self, /, value: str) -> None:
+        """
+        トラック名 (draft-ietf-moq-msf-01 §5.2.3 (Track name))。必須。
+        """
+    @property
+    def namespace(self, /) -> str |None:
+        """
+        トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+        """
+    @namespace.setter
+    def namespace(self, /, value: str |None) -> None:
+        """
+        トラックネームスペース (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+        """
+    @property
+    def packaging(self, /) -> str:
+        """
+        パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))。必須。
+        """
+    @packaging.setter
+    def packaging(self, /, value: str) -> None:
+        """
+        パッケージングタイプ (draft-ietf-moq-msf-01 §5.2.4 (Packaging))。必須。
+        """
+    @property
+    def render_group(self, /) -> int |None:
+        """
+        レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+        """
+    @render_group.setter
+    def render_group(self, /, value: int |None) -> None:
+        """
+        レンダーグループ (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+        """
+    @property
+    def role(self, /) -> str |None:
+        """
+        トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))。
+        """
+    @role.setter
+    def role(self, /, value: str |None) -> None:
+        """
+        トラックロール (draft-ietf-moq-msf-01 §5.2.6 (Track role))。
+        """
+    @property
+    def samplerate(self, /) -> int |None:
+        """
+        オーディオサンプルレート (Hz) (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))。
+        """
+    @samplerate.setter
+    def samplerate(self, /, value: int |None) -> None:
+        """
+        オーディオサンプルレート (Hz) (draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate))。
+        """
+    @property
+    def spatial_id(self, /) -> int |None:
+        """
+        スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))。
+        """
+    @spatial_id.setter
+    def spatial_id(self, /, value: int |None) -> None:
+        """
+        スペーシャル ID (draft-ietf-moq-msf-01 §5.2.17 (Spatial ID))。
+        """
+    @property
+    def target_latency(self, /) -> int |None:
+        """
+        ターゲットレイテンシ (ms) (draft-ietf-moq-msf-01 §5.2.8 (Target latency))。
+        
+        `buffers` と同時には指定できない。
+        """
+    @target_latency.setter
+    def target_latency(self, /, value: int |None) -> None:
+        """
+        ターゲットレイテンシ (ms) (draft-ietf-moq-msf-01 §5.2.8 (Target latency))。
+        
+        `buffers` と同時には指定できない。
+        """
+    @property
+    def template(self, /) -> Template |None:
+        """
+        メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))。
+        """
+    @template.setter
+    def template(self, /, value: Template |None) -> None:
+        """
+        メディアタイムラインテンプレート (draft-ietf-moq-msf-01 §5.2.15 (Template))。
+        """
+    @property
+    def temporal_id(self, /) -> int |None:
+        """
+        テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))。
+        """
+    @temporal_id.setter
+    def temporal_id(self, /, value: int |None) -> None:
+        """
+        テンポラル ID (draft-ietf-moq-msf-01 §5.2.16 (Temporal ID))。
+        """
+    @property
+    def timescale(self, /) -> int |None:
+        """
+        タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))。
+        """
+    @timescale.setter
+    def timescale(self, /, value: int |None) -> None:
+        """
+        タイムスケール (draft-ietf-moq-msf-01 §5.2.21 (Timescale))。
+        """
+    @property
+    def token(self, /) -> str |None:
+        """
+        認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))。
+        """
+    @token.setter
+    def token(self, /, value: str |None) -> None:
+        """
+        認証トークン (draft-ietf-moq-msf-01 §5.2.37 (Token))。
+        """
+    @property
+    def track_base_key(self, /) -> str |None:
+        """
+        track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))。
+        """
+    @track_base_key.setter
+    def track_base_key(self, /, value: str |None) -> None:
+        """
+        track 基本鍵 (draft-ietf-moq-msf-01 §5.2.41 (Track Base Key))。
+        """
+    @property
+    def track_duration(self, /) -> int |None:
+        """
+        トラック長 (ms) (draft-ietf-moq-msf-01 §5.2.35 (Track duration))。
+        
+        `is_live` が真の場合は指定できない。
+        """
+    @track_duration.setter
+    def track_duration(self, /, value: int |None) -> None:
+        """
+        トラック長 (ms) (draft-ietf-moq-msf-01 §5.2.35 (Track duration))。
+        
+        `is_live` が真の場合は指定できない。
+        """
+    @property
+    def width(self, /) -> int |None:
+        """
+        エンコード幅 (px) (draft-ietf-moq-msf-01 §5.2.26 (Width))。
+        """
+    @width.setter
+    def width(self, /, value: int |None) -> None:
+        """
+        エンコード幅 (px) (draft-ietf-moq-msf-01 §5.2.26 (Width))。
         """
 
 @final
@@ -1208,6 +2471,7 @@ def resolve_timeline_template(template: list, n: int) -> tuple[int, int, int, in
     
     `template` は `Catalog.tracks` の `template` 配列である。値が負の整数または
     配列でない場合は `ValueError` になる。計算が overflow する場合は `None` を返す。
+    型付きで組み立てた [`Template`] からは [`Template::resolve_entry`] で同じ計算ができる。
     """
 
 def serialize_name(namespace: Sequence[Sequence[int]], track_name: bytes) -> str:

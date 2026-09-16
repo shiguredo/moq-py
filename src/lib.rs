@@ -103,7 +103,8 @@ mod _native {
     // MSF の codec (moqt.msf)
     #[pymodule_export]
     use crate::msf::{
-        Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri, parse_fragment_pairs,
+        Accessibility, AuthInfo, Buffers, Catalog, CloneTrack, DeltaUpdate, EventTimeline,
+        InitData, MediaTimeline, RemoveTrack, Template, Track, Uri, parse_fragment_pairs,
         parse_msf_fragment, parse_name, resolve_catalog_variables, resolve_timeline_template,
         serialize_name,
     };

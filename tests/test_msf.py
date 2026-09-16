@@ -4,7 +4,21 @@ import json
 
 import pytest
 from moqt import msf
-from moqt.msf import Catalog, DeltaUpdate, EventTimeline, MediaTimeline, Uri
+from moqt.msf import (
+    Accessibility,
+    AuthInfo,
+    Buffers,
+    Catalog,
+    CloneTrack,
+    DeltaUpdate,
+    EventTimeline,
+    InitData,
+    MediaTimeline,
+    RemoveTrack,
+    Template,
+    Track,
+    Uri,
+)
 
 # このライブラリが対応する MSF のバージョン (draft-ietf-moq-msf-01 §5.1.1)。
 SUPPORTED_VERSION = "draft-01"
@@ -250,6 +264,418 @@ def test_delta_update_rejects_an_empty_operation_list() -> None:
     """
     with pytest.raises(ValueError, match="delta update MUST contain at least one operation"):
         DeltaUpdate.parse('{"deltaUpdate":[]}')
+
+
+def test_catalog_builds_tracks_without_json() -> None:
+    """
+    JSON 文字列を経由せずにトラックを組み立ててカタログを encode できることを確認する。
+
+    draft は name / packaging / isLive を必須とし、残りを任意のフィールドとして定義する
+    (draft-ietf-moq-msf-01 §5.2 (Track Object Fields))。
+    """
+    catalog = Catalog()
+    catalog.generated_at = 1234
+    track = Track("video", "loc", True)
+    track.role = "video"
+    track.codec = "av01"
+    track.bitrate = 1_000_000
+    catalog.add_track(track)
+
+    # encode した JSON を読み直し、draft のフィールド名で値が入っていることを確認する
+    encoded = Catalog.decode(catalog.encode())
+
+    assert encoded.generated_at == 1234
+    assert encoded.is_complete is False
+    assert encoded.tracks == [
+        {
+            "name": "video",
+            "packaging": "loc",
+            "isLive": True,
+            "role": "video",
+            "codec": "av01",
+            "bitrate": 1_000_000,
+        }
+    ]
+
+
+def test_catalog_builds_a_media_timeline_track() -> None:
+    """
+    depends と mimeType を持つ mediatimeline トラックを組み立てられることを確認する。
+
+    draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) は mediatimeline の
+    トラックに depends と mimeType "application/json" を要求する。テンプレートは
+    §5.2.15 (Template) の 6 要素の JSON 配列として書き出される。
+    """
+    catalog = Catalog()
+    track = Track("timeline", "mediatimeline", True)
+    track.depends = ["video"]
+    track.mime_type = "application/json"
+    track.template = Template(1000, 33, 1, 0, 1, 2, 5000, 33)
+    catalog.add_track(track)
+
+    encoded = Catalog.decode(catalog.encode())
+
+    assert encoded.tracks == [
+        {
+            "name": "timeline",
+            "packaging": "mediatimeline",
+            "isLive": True,
+            "depends": ["video"],
+            "template": [1000, 33, [1, 0], [1, 2], 5000, 33],
+            "mimeType": "application/json",
+        }
+    ]
+
+
+def test_catalog_builds_a_track_with_buffers_and_init_data() -> None:
+    """
+    バッファと初期化データを持つトラックを組み立てられることを確認する。
+
+    initRef は initDataList の id を指さなければならない
+    (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))。
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.buffers = Buffers(target=100, min=50, max=200)
+    track.init_ref = "init"
+    catalog.add_track(track)
+    catalog.add_init_data(InitData("init", "AAAA"))
+
+    encoded = Catalog.decode(catalog.encode())
+
+    assert encoded.tracks == [
+        {
+            "name": "video",
+            "packaging": "loc",
+            "isLive": True,
+            "buffers": {"target": 100, "min": 50, "max": 200},
+            "initRef": "init",
+        }
+    ]
+    assert encoded.init_data_list == [{"id": "init", "type": "inline", "data": "AAAA"}]
+
+
+def test_catalog_builds_a_track_with_auth_info_and_accessibility() -> None:
+    """
+    認可情報と accessibility 記述子を持つトラックを組み立てられることを確認する。
+
+    authInfo の値は scheme 固有の JSON 値であり、そのまま書き出される
+    (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) / §5.2.44 (Accessibility))。
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.auth_info = [AuthInfo("bearer", b'{"token":"abc"}')]
+    track.accessibility = [Accessibility("urn:example:scheme", "value")]
+    catalog.add_track(track)
+
+    encoded = Catalog.decode(catalog.encode())
+
+    assert encoded.tracks[0]["authInfo"] == {"bearer": {"token": "abc"}}
+    assert encoded.tracks[0]["accessibility"] == [
+        {"scheme": "urn:example:scheme", "value": "value"}
+    ]
+
+
+def test_catalog_builds_a_publish_track() -> None:
+    """
+    publishTracks へトラックを追加できることを確認する。
+
+    (draft-ietf-moq-msf-01 §5.1.5 (Publish tracks))
+    """
+    catalog = Catalog()
+    catalog.add_publish_track(Track("publish", "loc", True))
+
+    encoded = Catalog.decode(catalog.encode())
+
+    assert encoded.tracks == []
+    assert encoded.publish_tracks == [{"name": "publish", "packaging": "loc", "isLive": True}]
+
+
+def test_catalog_rejects_an_unknown_packaging() -> None:
+    """
+    draft が定めない packaging を持つトラックの追加を拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.4 (Packaging) Table 4 が許容値を定める。
+    """
+    catalog = Catalog()
+
+    with pytest.raises(ValueError, match="unknown MSF packaging 'bogus'"):
+        catalog.add_track(Track("video", "bogus", True))
+
+
+def test_catalog_rejects_event_type_outside_an_event_timeline() -> None:
+    """
+    packaging が eventtimeline でないトラックの eventType を encode 時に拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): "This field MUST NOT be used
+    if the packaging value is not \"eventtimeline\"."
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.event_type = "com.example.event"
+    catalog.add_track(track)
+
+    with pytest.raises(ValueError, match="eventType MUST NOT be used"):
+        catalog.encode()
+
+
+def test_catalog_rejects_target_latency_and_buffers_together() -> None:
+    """
+    targetLatency と buffers を同時に持つトラックを encode 時に拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers) はどちらか一方
+    だけを許す。
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.target_latency = 100
+    track.buffers = Buffers(target=100)
+    catalog.add_track(track)
+
+    with pytest.raises(ValueError, match="targetLatency and buffers MUST NOT be present together"):
+        catalog.encode()
+
+
+def test_catalog_rejects_a_track_duration_on_a_live_track() -> None:
+    """
+    ライブトラックの trackDuration を encode 時に拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.2.35 (Track duration))
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.track_duration = 10_000
+    catalog.add_track(track)
+
+    with pytest.raises(ValueError, match="trackDuration MUST NOT be included"):
+        catalog.encode()
+
+
+def test_catalog_rejects_a_media_timeline_track_without_depends() -> None:
+    """
+    depends を持たない mediatimeline トラックを encode 時に拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements))
+    """
+    catalog = Catalog()
+    catalog.add_track(Track("timeline", "mediatimeline", True))
+
+    with pytest.raises(ValueError, match="mediatimeline track MUST have a 'depends' attribute"):
+        catalog.encode()
+
+
+def test_catalog_rejects_a_duplicated_track_name() -> None:
+    """
+    同じネームスペースで名前が重複するトラックを encode 時に拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.3 (Track name): "Within the catalog, track names MUST
+    be unique per namespace."
+    """
+    catalog = Catalog()
+    catalog.add_track(Track("video", "loc", True))
+    catalog.add_track(Track("video", "loc", True))
+
+    with pytest.raises(ValueError, match="duplicate track name 'video'"):
+        catalog.encode()
+
+
+def test_catalog_rejects_an_init_ref_without_init_data() -> None:
+    """
+    initDataList に無い id を指す initRef を encode 時に拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.2.13 (Initialization reference))
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.init_ref = "missing"
+    catalog.add_track(track)
+
+    with pytest.raises(ValueError, match="initRef 'missing' does not match any initDataList id"):
+        catalog.encode()
+
+
+def test_catalog_rejects_an_auth_info_value_that_is_not_a_json_value() -> None:
+    """
+    JSON として解釈できない authInfo の値を encode 時に拒否することを確認する。
+
+    値は scheme 固有の単独の JSON 値でなければならない
+    (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+    """
+    invalid_json = Catalog()
+    track = Track("video", "loc", True)
+    track.auth_info = [AuthInfo("bearer", b"not json")]
+    invalid_json.add_track(track)
+
+    with pytest.raises(ValueError, match="JSON parse error"):
+        invalid_json.encode()
+
+    # UTF-8 でない値も JSON 値にはなり得ない
+    invalid_utf8 = Catalog()
+    track = Track("video", "loc", True)
+    track.auth_info = [AuthInfo("bearer", b"\xff")]
+    invalid_utf8.add_track(track)
+
+    with pytest.raises(ValueError, match="authInfo value is not valid UTF-8"):
+        invalid_utf8.encode()
+
+
+def test_template_resolves_entries() -> None:
+    """
+    テンプレートから n 番目のエントリを計算できることを確認する。
+
+    式は `resolve_timeline_template` と同じである (draft-ietf-moq-msf-01 §7.4.1)。
+    """
+    template = Template(1000, 33, 1, 0, 1, 2, 5000, 33)
+
+    assert template.resolve_entry(0) == (1000, 1, 0, 5000)
+    assert template.resolve_entry(3) == (1099, 4, 6, 5099)
+    # overflow する計算は `None` になる
+    overflow = Template(2**64 - 1, 2**64 - 1, 0, 0, 0, 0, 0, 0)
+    assert overflow.resolve_entry(2) is None
+
+
+def test_delta_update_builds_operations_without_json() -> None:
+    """
+    JSON 文字列を経由せずに delta 更新の操作列を組み立てて encode できることを確認する。
+
+    操作は追加した順に配列へ並ぶ (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。
+    """
+    delta = DeltaUpdate()
+    delta.generated_at = 99
+    delta.add_tracks([Track("audio", "loc", True)])
+    delta.remove_tracks([RemoveTrack("video")])
+    delta.clone_tracks([CloneTrack("video-low", "video")])
+
+    encoded = DeltaUpdate.decode(delta.encode())
+
+    assert encoded.generated_at == 99
+    assert encoded.operations == {
+        "deltaUpdate": [
+            {"op": "add", "tracks": [{"name": "audio", "packaging": "loc", "isLive": True}]},
+            {"op": "remove", "tracks": [{"name": "video"}]},
+            {"op": "clone", "tracks": [{"name": "video-low", "parentName": "video"}]},
+        ],
+        "generatedAt": 99,
+    }
+
+
+def test_delta_update_adds_removes_and_clones_tracks_in_a_catalog() -> None:
+    """
+    組み立てた delta 更新をカタログへ適用できることを確認する。
+
+    操作は配列順に適用されるため、複製は親トラックが残っているうちに行う
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update))。複製したトラックは親の属性を継承する。
+    """
+    catalog = Catalog()
+    catalog.add_track(Track("video", "loc", True))
+    catalog.add_track(Track("audio", "loc", True))
+
+    delta = DeltaUpdate()
+    delta.clone_tracks([CloneTrack("video-low", "video")])
+    delta.remove_tracks([RemoveTrack("audio")])
+    delta.add_tracks([Track("text", "loc", True)])
+
+    catalog.apply_delta_update(delta)
+
+    assert [track["name"] for track in catalog.tracks] == ["video", "video-low", "text"]
+    assert catalog.tracks[1] == {"name": "video-low", "packaging": "loc", "isLive": True}
+    # 適用後のカタログも encode でき、同じ内容が読み直せる
+    assert Catalog.decode(catalog.encode()).tracks == catalog.tracks
+
+
+def test_delta_update_clone_overrides_an_inherited_attribute() -> None:
+    """
+    複製で再定義した属性が親の値を上書きすることを確認する。
+
+    draft-ietf-moq-msf-01 §5.1.6 (Delta update): "Attributes redefined in the track
+    object override inherited values."
+    """
+    catalog = Catalog()
+    parent = Track("video", "loc", True)
+    parent.label = "main"
+    catalog.add_track(parent)
+
+    clone = CloneTrack("video-low", "video")
+    clone.label = "low"
+    delta = DeltaUpdate()
+    delta.clone_tracks([clone])
+
+    catalog.apply_delta_update(delta)
+
+    assert catalog.tracks[1]["label"] == "low"
+    assert catalog.tracks[0]["label"] == "main"
+
+
+def test_delta_update_finds_a_track_by_the_catalog_namespace() -> None:
+    """
+    カタログのネームスペースを省略した参照を namespace で解決することを確認する。
+
+    draft-ietf-moq-msf-01 §5.2.2 (Track namespace): トラックが namespace を省略した
+    場合はカタログトラック自身のネームスペースを継承する。
+    """
+    catalog = Catalog()
+    track = Track("video", "loc", True)
+    track.namespace = "ns"
+    catalog.add_track(track)
+
+    delta = DeltaUpdate()
+    delta.remove_tracks([RemoveTrack("video")])
+
+    catalog.apply_delta_update(delta, "ns")
+
+    assert catalog.tracks == []
+
+
+def test_delta_update_rejects_an_empty_operation_list_on_encode() -> None:
+    """
+    操作を 1 つも追加していない delta 更新の encode を拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.3 (Delta updates))
+    """
+    with pytest.raises(ValueError, match="delta update MUST contain at least one operation"):
+        DeltaUpdate().encode()
+
+
+def test_delta_update_rejects_an_unknown_packaging() -> None:
+    """
+    draft が定めない packaging を持つトラックの追加を拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.2.4 (Packaging) Table 4)
+    """
+    delta = DeltaUpdate()
+
+    with pytest.raises(ValueError, match="unknown MSF packaging 'bogus'"):
+        delta.add_tracks([Track("audio", "bogus", True)])
+
+
+def test_delta_update_rejects_a_clone_of_a_missing_parent() -> None:
+    """
+    存在しない親トラックを指す複製の適用を拒否することを確認する。
+
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update))
+    """
+    catalog = Catalog()
+    delta = DeltaUpdate()
+    delta.clone_tracks([CloneTrack("video-low", "missing")])
+
+    with pytest.raises(ValueError, match="delta clone: parent track 'missing' not found"):
+        catalog.apply_delta_update(delta)
+
+
+def test_delta_update_rejects_an_add_to_a_complete_catalog() -> None:
+    """
+    isComplete が真のカタログへのトラック追加を拒否することを確認する。
+
+    draft-ietf-moq-msf-01 §5.1.3 (Is Complete): "no new tracks will be added to
+    the catalog"
+    """
+    catalog = Catalog()
+    catalog.is_complete = True
+    delta = DeltaUpdate()
+    delta.add_tracks([Track("audio", "loc", True)])
+
+    with pytest.raises(ValueError, match="catalog is complete"):
+        catalog.apply_delta_update(delta)
 
 
 def test_media_timeline_round_trips() -> None:

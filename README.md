@@ -228,6 +228,15 @@ print(catalog.tracks)
 catalog.apply_delta('{"deltaUpdate":[{"op":"remove","tracks":[{"name":"video"}]}]}')
 print(catalog.encode())
 
+# JSON 文字列を経由せずにカタログと delta 更新を組み立てる
+built = msf.Catalog()
+built.add_track(msf.Track("video", "loc", True))
+delta = msf.DeltaUpdate()
+delta.add_tracks([msf.Track("audio", "loc", True)])
+delta.clone_tracks([msf.CloneTrack("video-low", "video")])
+built.apply_delta_update(delta)
+print(built.encode())
+
 # タイムラインは gzip 圧縮にも対応する
 timeline = msf.MediaTimeline()
 timeline.add(1000, 1, 2, 0)

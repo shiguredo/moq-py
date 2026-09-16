@@ -7,15 +7,28 @@ delta 更新の適用を担う。
 カタログは ``catalog`` という Track 名で配信する (draft-ietf-moq-msf-01 §4.1)。
 ``CATALOG_TRACK_NAME`` がその名前である。
 
+カタログと delta 更新は JSON 文字列を経由せずに組み立てられる。``Track`` /
+``CloneTrack`` / ``RemoveTrack`` が操作の対象であり、``Catalog.add_track`` と
+``DeltaUpdate`` の各メソッドがそれらを取り込む。追加した内容が draft の MUST に
+違反する場合は encode 時に ``ValueError`` になる。
+
 MSF は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
 from moqt import _native
 from moqt._native import (
+    Accessibility,
+    AuthInfo,
+    Buffers,
     Catalog,
+    CloneTrack,
     DeltaUpdate,
     EventTimeline,
+    InitData,
     MediaTimeline,
+    RemoveTrack,
+    Template,
+    Track,
     Uri,
     parse_fragment_pairs,
     parse_msf_fragment,
@@ -34,10 +47,18 @@ CATALOG_TRACK_NAME: bytes = _native.MSF_CATALOG_TRACK_NAME
 __all__ = [
     "CATALOG_TRACK_NAME",
     "MSF_VERSION",
+    "Accessibility",
+    "AuthInfo",
+    "Buffers",
     "Catalog",
+    "CloneTrack",
     "DeltaUpdate",
     "EventTimeline",
+    "InitData",
     "MediaTimeline",
+    "RemoveTrack",
+    "Template",
+    "Track",
     "Uri",
     "parse_fragment_pairs",
     "parse_msf_fragment",
