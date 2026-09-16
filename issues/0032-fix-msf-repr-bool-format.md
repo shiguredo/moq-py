@@ -1,7 +1,7 @@
 # MSF の構築 API の repr が Rust の bool 表記になる
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-17
 - Branch: feature/fix-msf-repr-bool-format
 - Polished:
 
@@ -36,3 +36,23 @@ MSF の構築 API の `repr` を確認し、Rust の bool 表記が現れるも�
 
 - 構築 API の `repr` に `true` / `false` が現れないこと
 - テストで `repr` の内容を確認できること
+
+## 解決方法
+
+構築 API の `repr` を実際に出力して確認したところ、Rust の bool 表記が現れたのは
+`Track` と `Catalog` の 2 つだった。
+
+`src/msf.rs` に `bool` を Python の値と同じ表記で書き出す `format_bool` を
+`format_optional` の隣に追加し、この 2 つの `__repr__` で bool をそのまま埋め込むのを
+やめた。
+
+- `Track.__repr__` の `is_live` は `True` や `False` と表示される
+- `Catalog.__repr__` の `is_complete` は `True` や `False` と表示される
+
+残りの構築 API (`CloneTrack` / `RemoveTrack` / `InitData` / `Buffers` / `Template` /
+`AuthInfo` / `Accessibility` / `DeltaUpdate` / `MediaTimeline` / `EventTimeline` /
+`Uri`) は bool のフィールドを `repr` に含めていないため変更していない。
+
+`tests/test_msf.py` に `test_builders_repr_use_python_bool_notation` を追加した。
+`Track` と `Catalog` は `repr` を完全一致で確認し、`is_complete` を真にした場合も
+確認する。残りの構築 API は `repr` に `true` / `false` が現れないことを確認する。
