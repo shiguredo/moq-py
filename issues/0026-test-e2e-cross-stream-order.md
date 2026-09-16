@@ -1,7 +1,7 @@
 # e2e テストが subgroup ストリーム間の到着順に依存している
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-e2e-cross-stream-order
 - Polished:
 
@@ -33,3 +33,9 @@ Group 内の並びだけを検証する。
 - `test_objects_in_a_second_group_are_delivered` が Group をまたぐ到着順に依存しないこと
 - Group ごとの Object ID とペイロードの対応は引き続き検証されること
 - テストを繰り返し実行しても失敗しないこと
+
+## 解決方法
+
+`tests/test_e2e.py` の `test_objects_in_a_second_group_are_delivered` を、受信した
+オブジェクトを Group ID ごとにまとめてから Group 内の並びを検証する形に変えた。
+ストリーム間の到着順には依存しない。
