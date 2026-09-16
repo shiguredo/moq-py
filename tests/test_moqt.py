@@ -1822,6 +1822,123 @@ def test_track_status_state_accessor_reports_an_ok_response() -> None:
     assert entry["largest_location"] == (3, 4)
 
 
+def test_terminated_subscription_is_forgotten_only_after_cleanup_is_ready() -> None:
+    """
+    終了した subscription を cleanup 可能になってから回収することを確認する。
+
+    購読が終了しても同じ Request ID への参照が残っている可能性があるため、回収は
+    `subscription_cleanup_ready` が真を返したときだけ行う。終了前に `forget_subscription`
+    を呼んでも状態機械は変化しない
+    (draft-ietf-moq-transport-21 §3.1.1 (Subscription State Management))。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    # 確立中の subscription は回収できない
+    assert client.subscription_cleanup_ready(request_id) is False
+    assert client.forget_subscription(request_id) is False
+    assert client.subscription(request_id) is not None
+    # 保持していない Request ID は照会も回収もできない
+    assert client.subscription_cleanup_ready(9999) is None
+    assert client.forget_subscription(9999) is False
+
+    # 購読を終了すると回収できるようになる
+    client.stop_sending(request_id)
+    assert client.subscription_cleanup_ready(request_id) is True
+    assert client.forget_subscription(request_id) is True
+    assert client.subscription(request_id) is None
+    # 回収後の照会と二重の回収は安全である
+    assert client.subscription_cleanup_ready(request_id) is None
+    assert client.forget_subscription(request_id) is False
+
+
+def test_terminated_fetch_is_forgotten_only_after_cleanup_is_ready() -> None:
+    """
+    終了した fetch を cleanup 可能になってから回収することを確認する。
+
+    fetch は subscriber 側の cancel で `Terminated` になり、受信中のデータストリームが
+    無くなった時点で回収できる。終了前に `forget_fetch` を呼んでも状態機械は変化しない
+    (draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management))。
+    """
+    client, server = _setup()
+    request_id = _fetch_round_trip(client, server, 4)
+
+    # 確立中の fetch は回収できない
+    assert client.fetch_cleanup_ready(request_id) is False
+    assert client.forget_fetch(request_id) is False
+    assert client.fetch(request_id) is not None
+    assert client.fetch_cleanup_ready(9999) is None
+    assert client.forget_fetch(9999) is False
+
+    # cancel すると回収できるようになる
+    client.send_fetch_stop_sending(request_id)
+    assert client.fetch_cleanup_ready(request_id) is True
+    assert client.forget_fetch(request_id) is True
+    assert client.fetch(request_id) is None
+    # 回収後の照会と二重の回収は安全である
+    assert client.fetch_cleanup_ready(request_id) is None
+    assert client.forget_fetch(request_id) is False
+
+
+def test_track_status_is_forgotten_only_after_the_response() -> None:
+    """
+    応答済みの TRACK_STATUS だけを回収できることを確認する。
+
+    状態機械は TRACK_STATUS の受信側を扱わないため、relay が返す REQUEST_OK を
+    購読の REQUEST_UPDATE_OK として生成し、TRACK_STATUS の request stream へ流し込む。
+    応答が載る bidi request stream の終端を通知した後は request stream の対応が消えるため
+    回収できない (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+    """
+    client, server = _setup()
+    status_events = client.send_track_status([b"ns"], b"t", {})
+    status_request_id = _request_id(status_events[0])
+    client.register_local_request_stream(4, status_request_id)
+
+    # 応答前の TRACK_STATUS は回収できない
+    assert client.forget_track_status(status_request_id) is False
+    assert client.track_status_request(status_request_id) is not None
+    # 保持していない Request ID も回収できない
+    assert client.forget_track_status(9999) is False
+
+    # 購読の REQUEST_UPDATE_OK と同じ REQUEST_OK を応答として流し込む
+    subscribe_events = client.send_subscribe([b"ns"], b"t", {})
+    subscription_request_id = _request_id(subscribe_events[0])
+    client.register_local_request_stream(8, subscription_request_id)
+    server.receive_request_stream(8, _message_data(subscribe_events[0]), "peer")
+    accepted = server.send_subscribe_ok(subscription_request_id, 1, {}, {})
+    client.receive_request_stream(8, _message_data(accepted[0]), "local")
+    update_events = client.send_request_update(subscription_request_id, {})
+    server.receive_request_stream(8, _message_data(update_events[0]), "peer")
+    ok = server.send_request_ok(subscription_request_id, {}, {})
+    client.receive_request_stream(4, _message_data(ok[0]), "local")
+
+    # 応答後は回収できる
+    assert client.forget_track_status(status_request_id) is True
+    assert client.track_status_request(status_request_id) is None
+    # 回収後の二重の回収は安全である
+    assert client.forget_track_status(status_request_id) is False
+
+
+def test_track_status_is_forgotten_after_the_stream_ended_without_a_response() -> None:
+    """
+    応答前に request stream が終端した TRACK_STATUS を回収できることを確認する。
+
+    応答が届かないまま終端した場合は REQUEST_ERROR として記録されるため、状態機械は
+    回収できる。回収後は Request ID の照会も二重の回収も安全である
+    (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+    """
+    client, _server = _setup()
+    events = client.send_track_status([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+
+    # 終端通知の後はエラー応答として記録され、回収できる
+    client.receive_request_stream_closed(4, False, None)
+    assert client.forget_track_status(request_id) is True
+    assert client.track_status_request(request_id) is None
+    assert client.forget_track_status(request_id) is False
+
+
 def test_goaway_drain_accessors_report_blocking_requests() -> None:
     """GOAWAY の drain を妨げている request を照会できることを確認する。
 

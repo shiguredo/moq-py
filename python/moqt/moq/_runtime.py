@@ -504,6 +504,38 @@ class Runtime:
         """
         return dict(self._core.track_status_requests())
 
+    def forget_track_status(self, request_id: int) -> bool:
+        """応答済みの TRACK_STATUS を状態機械から破棄する。
+
+        破棄できた場合は `True` を返す。応答を受信していない TRACK_STATUS と、
+        保持していない Request ID では `False` を返す。応答前に request stream が
+        終端した場合はエラー応答として記録されるため破棄できる
+        (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+        """
+        return bool(self._core.forget_track_status(request_id))
+
+    def cleanup_terminated_requests(self) -> None:
+        """終了した request を状態機械から回収する。
+
+        状態機械は request ごとに購読状態と送受信ストリームの簿記を保持するため、
+        終了した request を回収しないと長時間動くセッションでメモリ使用量が増え続ける。
+        購読が終了しても同じ Request ID への参照が残っている可能性があるため、
+        回収は `*_cleanup_ready` が真を返したときだけ行う。
+
+        TRACK_STATUS には `*_cleanup_ready` が無いため、応答の有無だけで判断する
+        (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+        """
+        for request_id in list(self._core.subscriptions()):
+            if self._core.subscription_cleanup_ready(request_id) is True:
+                self._core.forget_subscription(request_id)
+        for request_id in list(self._core.fetches()):
+            if self._core.fetch_cleanup_ready(request_id) is True:
+                self._core.forget_fetch(request_id)
+        for request_id in list(self._core.track_status_requests()):
+            entry = self._core.track_status_request(request_id)
+            if entry is not None and entry["response"] != "pending":
+                self._core.forget_track_status(request_id)
+
     # ─── 開始と終了 ─────────────────────────────────────────
 
     async def start(self) -> None:
@@ -596,11 +628,16 @@ class Runtime:
     # ─── 定期処理 ───────────────────────────────────────────
 
     async def tick(self) -> None:
-        """タイムアウトを判定する。"""
+        """タイムアウトを判定する。
+
+        終了した request の回収もここで行う。購読の drain 満了や data stream の終端は
+        イベントを伴わずに後から回収可能になるため、定期処理で観測する。
+        """
         if self._closed:
             return
         now_ms = int(asyncio.get_running_loop().time() * 1000)
         await self._apply_events(self._core.tick(now_ms))
+        self.cleanup_terminated_requests()
 
     # ─── 要求 ───────────────────────────────────────────────
 
@@ -892,6 +929,14 @@ class Runtime:
     async def stop_sending(self, request_id: int) -> None:
         """subscription を終了する (subscriber 側の STOP_SENDING)。"""
         await self._apply_events(self._core.stop_sending(request_id))
+
+    async def send_fetch_stop_sending(self, request_id: int) -> None:
+        """fetch を取り消す (subscriber 側の STOP_SENDING)。
+
+        状態機械は bidi request stream と fetch stream の終端を確認したうえで
+        fetch を回収する (draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management))。
+        """
+        await self._apply_events(self._core.send_fetch_stop_sending(request_id))
 
     async def reset_subgroup(self, request_id: int, error_code: int) -> None:
         """送信中の subgroup ストリームを reset する。

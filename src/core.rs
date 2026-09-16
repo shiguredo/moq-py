@@ -2585,6 +2585,16 @@ impl CoreSession {
         self.session.fetch_cleanup_ready(request_id)
     }
 
+    /// 応答済みの TRACK_STATUS を破棄する。
+    ///
+    /// 応答 (TRACK_STATUS_OK / REQUEST_ERROR) を受信する前の TRACK_STATUS と、保持して
+    /// いない Request ID では破棄しない。応答前に request stream が終端した場合は
+    /// REQUEST_ERROR として記録されるため破棄できる
+    /// (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+    fn forget_track_status(&mut self, request_id: u64) -> bool {
+        self.session.forget_track_status(request_id).is_some()
+    }
+
     /// 次の request 用 Request ID を予約する。
     fn next_local_request_id(&mut self) -> PyResult<u64> {
         self.session.next_local_request_id().map_err(runtime_error)

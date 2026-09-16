@@ -188,9 +188,13 @@ class Fetch:
 
     _objects: asyncio.Queue[MoqtObject | None] = field(default_factory=asyncio.Queue)
     _ranges: asyncio.Queue[tuple[str, int, int] | None] = field(default_factory=asyncio.Queue)
+    _runtime: Runtime | None = None
 
     async def objects(self) -> AsyncIterator[MoqtObject]:
-        """fetch で届いたオブジェクトを順に返す。"""
+        """fetch で届いたオブジェクトを順に返す。
+
+        fetch が終了すると反復も終わる。
+        """
         while True:
             item = await self._objects.get()
             if item is None:
@@ -209,6 +213,18 @@ class Fetch:
             if item is None:
                 return
             yield item
+
+    async def cancel(self) -> None:
+        """fetch を取り消す。
+
+        データストリームの受信を止めるよう peer へ通知し、状態機械から fetch を
+        回収する。取り消し後はオブジェクトも範囲の終端も届かない
+        (draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management))。
+        """
+        runtime = self._runtime
+        if runtime is None:
+            raise MoqtError("fetch has no runtime")
+        await runtime.send_fetch_stop_sending(self.request_id)
 
     def _push(self, item: MoqtObject) -> None:
         self._objects.put_nowait(item)
@@ -623,6 +639,7 @@ class Client:
             track_name=track_name,
             end_of_track=False,
             end_location=(0, 0),
+            _runtime=self._runtime,
         )
         self._fetches[request_id] = fetch
         return fetch
@@ -778,6 +795,11 @@ class Client:
         pending.append(item)
 
     async def _on_request_terminated(self, event: NativeEvent) -> None:
+        """終了した request を購読と fetch から外し、状態機械から回収する。
+
+        購読の drain 満了や fetch のデータストリーム終端はイベントを伴わずに後から
+        回収可能になるため、回収はランタイムの定期処理でも行う。
+        """
         request_id = event.request_id
         if request_id is None:
             return
@@ -789,6 +811,8 @@ class Client:
         fetch = self._fetches.pop(request_id, None)
         if fetch is not None:
             fetch._finish()
+        if self._runtime is not None:
+            self._runtime.cleanup_terminated_requests()
 
     async def _on_publish_done(self, event: NativeEvent) -> None:
         subscription = self._subscriptions.get(event.request_id or -1)

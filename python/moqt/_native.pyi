@@ -1683,6 +1683,15 @@ class Session:
         """
         終了済みの subscription を破棄する。
         """
+    def forget_track_status(self, /, request_id: int) -> bool:
+        """
+        応答済みの TRACK_STATUS を破棄する。
+        
+        応答 (TRACK_STATUS_OK / REQUEST_ERROR) を受信する前の TRACK_STATUS と、保持して
+        いない Request ID では破棄しない。応答前に request stream が終端した場合は
+        REQUEST_ERROR として記録されるため破棄できる
+        (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+        """
     def goaway_drain_ready(self, /) -> bool:
         """
         GOAWAY の drain が完了しているかを返す。

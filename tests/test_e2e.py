@@ -1371,3 +1371,69 @@ async def test_request_ok_metadata_is_exposed(moq_pair: MoqPair) -> None:
 
     # Track Properties を運ばない応答では空の辞書になる
     assert publication.track_properties == {}
+
+
+async def test_terminated_subscription_is_removed_from_the_session(moq_pair: MoqPair) -> None:
+    """
+    終了した購読が状態機械から回収されることを確認する。
+
+    状態機械は request ごとに購読状態と送受信ストリームの簿記を保持するため、終了した
+    購読を回収しないと長時間動くセッションでメモリ使用量が増え続ける。回収できるのは
+    Terminated になり、drain が満了し、open 中の受信 stream が無くなった時点である
+    (draft-ietf-moq-transport-21 §3.1.1 (Subscription State Management))。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 確立中の購読は状態機械に残っている
+    assert subscription.request_id in moq_pair.client.subscriptions()
+
+    # 購読を終了すると状態機械から回収される
+    await subscription.close()
+    await wait_until(lambda: subscription.request_id not in moq_pair.client.subscriptions())
+
+    # 回収後も Request ID の照会は安全であり、セッションは壊れていない
+    assert moq_pair.client.subscription_state(subscription.request_id) is None
+    assert moq_pair.client.established is True
+
+
+async def test_cancelled_fetch_is_removed_from_the_session(
+    moq_pair: MoqPair,
+    moq_client_factory: ClientFactory,
+) -> None:
+    """
+    取り消した fetch が状態機械から回収されることを確認する。
+
+    fetch は cancel すると fetch stream が reset され、Request ID の照会からも
+    消える。回収しないと fetch の簿記がセッション内に残り続ける
+    (draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management))。
+    """
+    responded = False
+
+    async def on_fetch(request: FetchRequest) -> None:
+        nonlocal responded
+        response = await request.respond((0, 0), end_of_track=True)
+        await response.send_object(1, 0, b"fetched")
+        responded = True
+
+    moq_pair.server.on_fetch(on_fetch)
+
+    fetch = await moq_pair.client.fetch(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: responded)
+
+    received = await _take_fetch_objects(fetch, 1)
+    assert received[0].payload == b"fetched"
+
+    # cancel すると fetch の状態機械のエントリが回収される
+    await fetch.cancel()
+    await wait_until(lambda: fetch.request_id not in moq_pair.client.fetches())
+
+    assert moq_pair.client.fetch_state(fetch.request_id) is None
+    assert moq_pair.client.established is True
