@@ -820,7 +820,12 @@ class Runtime:
             if writer is None or writer.last_object_id is None
             else object_id - writer.last_object_id - 1
         )
-        data = _encode_subgroup_object(delta, payload, status, properties_data)
+        # 状態機械が OBJECT_PROPERTY_FILTER を評価するバイト列と、wire へ書く
+        # バイト列を同一にする。moqt-rs の `Session::send_subgroup_object` は
+        # `Properties Length | Key-Value-Pairs` の生バイト列を受け取る
+        # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+        properties_bytes = None if properties_data is None else _properties_blob(properties_data)
+        data = _encode_subgroup_object(delta, payload, status, properties_bytes)
 
         if opens_stream:
             if writer is not None:
@@ -836,7 +841,9 @@ class Runtime:
             )
             self._subgroups[request_id] = writer
 
-        allowed, events = self._core.send_subgroup_object(writer.stream_id, object_id, None)
+        allowed, events = self._core.send_subgroup_object(
+            writer.stream_id, object_id, properties_bytes
+        )
         await self._apply_events(events)
         if not allowed:
             # ローカルのフィルタで破棄するオブジェクトは送信しない
@@ -1471,11 +1478,21 @@ def _properties_content(properties_data: bytes) -> bytes:
     return properties_data
 
 
+def _properties_blob(properties_data: bytes) -> bytes:
+    """Properties ブロックを `Properties Length | Key-Value-Pairs` の形へ整える。
+
+    状態機械へ渡すバイト列と wire へ書くバイト列を同じにするために使う
+    (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
+    """
+    content = _properties_content(properties_data)
+    return moqt.encode_varint(len(content)) + content
+
+
 def _encode_subgroup_object(
     object_id_delta: int,
     payload: bytes,
     status: int | None = None,
-    properties_data: bytes | None = None,
+    properties_bytes: bytes | None = None,
 ) -> bytes:
     """subgroup オブジェクトをエンコードする。
 
@@ -1483,18 +1500,16 @@ def _encode_subgroup_object(
     `(今回の Object ID) - (前回の Object ID) - 1` である
     (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
 
-    `properties_data` は `Properties Length | Key-Value-Pairs` の形である。
+    `properties_bytes` は `Properties Length | Key-Value-Pairs` の形である。
     省略した場合は Properties を書かない。
     """
     written = _object_status_to_write(status, payload)
     body = bytearray()
     body += moqt.encode_varint(object_id_delta)
-    if properties_data is not None:
+    if properties_bytes is not None:
         # オブジェクトは `Properties Length | Key-Value-Pairs` の順に書く
         # (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。
-        content = _properties_content(properties_data)
-        body += moqt.encode_varint(len(content))
-        body += content
+        body += properties_bytes
     body += moqt.encode_varint(len(payload))
     if written is None:
         body += payload

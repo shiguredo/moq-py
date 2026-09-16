@@ -1,12 +1,13 @@
 """webtransport-py と moqt-rs を接続する実通信テスト。"""
 
 import asyncio
+import contextlib
 import importlib
 import importlib.util
 import logging
 
 import pytest
-from moqt import moqt
+from moqt import loc, moqt
 from moqt.moq import Client, Fetch, MoqtObject, PeerGoaway, Server, Subscription
 from moqt.moq._runtime import MoqtError, Runtime
 from moqt.moq.server import FetchRequest, Publication, PublisherRequest, SubscriptionRequest
@@ -65,6 +66,34 @@ async def _take_fetch_objects(fetch: Fetch, count: int) -> list[MoqtObject]:
     return await collect_objects(fetch.objects(), count, OBJECT_TIMEOUT)
 
 
+def _range_filter(
+    set_id: int,
+    start: int,
+    end: int,
+    property_type: int | None = None,
+) -> bytes:
+    """Range Filter 1 個分のバイト列を作る。
+
+    `SetID (8 bits) | [Property Type (vi64)] | Start Delta (vi64) | End Delta (vi64)`
+    の形である。Property Type を持つのは OBJECT_PROPERTY_FILTER と
+    TRACK_PROPERTY_FILTER だけである
+    (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+    """
+    data = bytes([set_id])
+    if property_type is not None:
+        data += moqt.encode_varint(property_type)
+    data += moqt.encode_varint(start)
+    data += moqt.encode_varint(end - start)
+    return data
+
+
+def _object_properties(timestamp: int) -> bytes:
+    """LOC の TIMESTAMP だけを持つ Object Properties を作る。"""
+    properties = loc.Properties()
+    properties.add(loc.TIMESTAMP, timestamp)
+    return properties.encode()
+
+
 async def test_client_and_server_exchange_setup_over_webtransport(moq_pair: MoqPair) -> None:
     """
     localhost の実 WebTransport 接続上で MoQT SETUP が成立することを確認する。
@@ -81,6 +110,66 @@ async def test_client_and_server_exchange_setup_over_webtransport(moq_pair: MoqP
         moq_pair.session.runtime.peer_setup_options[moqt.SETUP_OPTION_MOQT_IMPLEMENTATION]
         == b"moqt-py"
     )
+
+
+async def test_object_property_filter_selects_objects_by_property(
+    moq_certificates: tuple[str, str],
+) -> None:
+    """
+    OBJECT_PROPERTY_FILTER を満たすオブジェクトだけが送信されることを確認する。
+
+    publisher は Range Filter を評価し、条件を満たさないオブジェクトを送らない
+    (draft-ietf-moq-transport-21 §3.3.3 (Combining Filters))。評価には
+    Object Properties が要る (§11.1.3 (Object Properties))。
+    subscriber が Range Filter を送るには publisher が SETUP で MAX_FILTER_RANGES を
+    宣言している必要がある (§9.1.6 (MAX FILTER RANGES))。
+    """
+    certfile, keyfile = moq_certificates
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=certfile,
+        keyfile=keyfile,
+        setup_options={moqt.SETUP_OPTION_MAX_FILTER_RANGES: 8},
+    )
+    await server.start()
+    run_task = asyncio.create_task(server.run())
+    client: Client | None = None
+    try:
+        published: list[Publication] = []
+
+        async def on_subscribe(request: SubscriptionRequest) -> None:
+            published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+        server.on_subscribe(on_subscribe)
+        client = Client(
+            url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+            verify_peer=False,
+        )
+        await client.connect()
+
+        # TIMESTAMP が 100 のオブジェクトだけを要求する
+        subscription = await client.subscribe(
+            NAMESPACE,
+            TRACK_NAME,
+            {moqt.PARAM_OBJECT_PROPERTY_FILTER: _range_filter(0, 100, 100, loc.TIMESTAMP)},
+        )
+        await wait_until(lambda: bool(published))
+
+        # 条件を満たさないオブジェクトを先に送る。フィルタが効いていれば届かない
+        await published[0].send_object(1, 0, b"mismatch", properties_data=_object_properties(200))
+        await published[0].send_object(1, 1, b"match", properties_data=_object_properties(100))
+
+        received = await collect_objects(subscription.objects(), 1, OBJECT_TIMEOUT)
+        assert received[0].payload == b"match"
+        assert received[0].object_id == 1
+    finally:
+        if client is not None:
+            await client.close()
+        await server.stop()
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
 
 
 async def test_two_clients_connect_to_one_server(moq_client_factory: ClientFactory) -> None:
