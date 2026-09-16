@@ -372,6 +372,128 @@ class Runtime:
         """セッションが閉じられたかを返す。"""
         return self._closed
 
+    @property
+    def peer_max_auth_token_cache_size(self) -> int:
+        """peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を返す。
+
+        宣言が無い場合は 0 である。AUTHORIZATION_TOKEN の Token Alias を登録する
+        アプリは、この値と登録量を突き合わせて peer の上限に収まるか判断する
+        (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+        """
+        return self._core.peer_max_auth_token_cache_size
+
+    @property
+    def peer_alias_retention_ms(self) -> int:
+        """キャンセル済み peer publisher alias の保持期間 (ms) を返す。
+
+        draft-ietf-moq-transport-21 §3.1.2 (Track Alias) の SHOULD に対応する
+        保持期間である。
+        """
+        return self._core.peer_alias_retention_ms
+
+    def set_peer_alias_retention_ms(self, retention_ms: int) -> None:
+        """キャンセル済み peer publisher alias の保持期間 (ms) を設定する。
+
+        0 を設定すると保持は実質無効になる。既に登録済みの保持期限は変わらない。
+        """
+        self._core.set_peer_alias_retention_ms(retention_ms)
+
+    @property
+    def control_message_timeout_ms(self) -> int | None:
+        """制御メッセージの応答待ちタイムアウト (ms) を返す。
+
+        無効の場合は `None` である
+        (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+        """
+        return self._core.control_message_timeout_ms
+
+    @property
+    def data_stream_timeout_ms(self) -> int | None:
+        """データストリームの停止を検出するタイムアウト (ms) を返す。
+
+        無効の場合は `None` である
+        (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+        """
+        return self._core.data_stream_timeout_ms
+
+    def goaway_drain_snapshot(self) -> dict[str, list[int]]:
+        """GOAWAY の drain を妨げている Request ID を返す。
+
+        キーは `blocking_subscription_request_ids` / `blocking_fetch_request_ids` /
+        `blocking_track_status_request_ids` である。GOAWAY を送った後にこれらが
+        空になった時点で、drain が完了したと判断できる
+        (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration) /
+        §9.2 (GOAWAY))。
+        """
+        return {key: list(value) for key, value in self._core.goaway_drain_snapshot().items()}
+
+    @property
+    def goaway_drain_ready(self) -> bool:
+        """GOAWAY の drain が完了しているかを返す。
+
+        drain を妨げる request が 1 件も無ければ `True` である
+        (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration))。
+        """
+        return self._core.goaway_drain_ready()
+
+    def open_outgoing_fill_stream_count(self, request_id: int) -> int:
+        """指定 subscription で open 中の送信 fill fetch stream 数を返す。
+
+        1 つの subscription に複数本の fill fetch stream が同時に開くことがある
+        (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+        """
+        return self._core.open_outgoing_fill_stream_count(request_id)
+
+    def subscription_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の subscription の状態を返す。
+
+        保持していない Request ID の場合は `None` である。全件は
+        `subscriptions()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._core.subscription(request_id)
+
+    def subscriptions(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 subscription の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return dict(self._core.subscriptions())
+
+    def fetch_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の fetch の状態を返す。
+
+        保持していない Request ID の場合は `None` である。`fetch` は FETCH を
+        開始する API であるため、状態の照会はこの名前で行う。全件は
+        `fetches()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._core.fetch(request_id)
+
+    def fetches(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 fetch の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return dict(self._core.fetches())
+
+    def track_status_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の TRACK_STATUS の状態を返す。
+
+        保持していない Request ID の場合は `None` である。`track_status` は
+        TRACK_STATUS を送る API であるため、状態の照会はこの名前で行う。全件は
+        `track_status_requests()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._core.track_status_request(request_id)
+
+    def track_status_requests(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 TRACK_STATUS の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return dict(self._core.track_status_requests())
+
     # ─── 開始と終了 ─────────────────────────────────────────
 
     async def start(self) -> None:

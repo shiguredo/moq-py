@@ -309,6 +309,102 @@ class Client:
         """peer から受信した GOAWAY。未受信の場合は `None`。"""
         return self._peer_goaway
 
+    @property
+    def peer_max_auth_token_cache_size(self) -> int:
+        """peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を返す。
+
+        宣言が無い場合は 0 である。AUTHORIZATION_TOKEN の Token Alias を登録する
+        アプリは、この値と登録量を突き合わせて peer の上限に収まるか判断する
+        (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+        """
+        return self._require_runtime().peer_max_auth_token_cache_size
+
+    @property
+    def peer_alias_retention_ms(self) -> int:
+        """キャンセル済み peer publisher alias の保持期間 (ms) を返す。
+
+        draft-ietf-moq-transport-21 §3.1.2 (Track Alias) の SHOULD に対応する
+        保持期間である。
+        """
+        return self._require_runtime().peer_alias_retention_ms
+
+    def set_peer_alias_retention_ms(self, retention_ms: int) -> None:
+        """キャンセル済み peer publisher alias の保持期間 (ms) を設定する。
+
+        0 を設定すると保持は実質無効になる。既に登録済みの保持期限は変わらない。
+        """
+        self._require_runtime().set_peer_alias_retention_ms(retention_ms)
+
+    @property
+    def goaway_drain_ready(self) -> bool:
+        """GOAWAY の drain が完了しているかを返す。
+
+        GOAWAY を送った後、購読や fetch の終了を待ってからセッションを閉じる
+        判断に使う
+        (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration))。
+        """
+        return self._require_runtime().goaway_drain_ready
+
+    def goaway_drain_snapshot(self) -> dict[str, list[int]]:
+        """GOAWAY の drain を妨げている Request ID を返す。
+
+        キーは `blocking_subscription_request_ids` / `blocking_fetch_request_ids` /
+        `blocking_track_status_request_ids` である
+        (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration) /
+        §9.2 (GOAWAY))。
+        """
+        return self._require_runtime().goaway_drain_snapshot()
+
+    def subscription_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の subscription の状態を返す。
+
+        保持していない Request ID の場合は `None` である。全件は
+        `subscriptions()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._require_runtime().subscription_state(request_id)
+
+    def subscriptions(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 subscription の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return self._require_runtime().subscriptions()
+
+    def fetch_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の fetch の状態を返す。
+
+        保持していない Request ID の場合は `None` である。`fetch` は FETCH を
+        開始する API であるため、状態の照会はこの名前で行う。全件は
+        `fetches()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._require_runtime().fetch_state(request_id)
+
+    def fetches(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 fetch の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return self._require_runtime().fetches()
+
+    def track_status_state(self, request_id: int) -> dict[str, object] | None:
+        """指定 Request ID の TRACK_STATUS の状態を返す。
+
+        保持していない Request ID の場合は `None` である。`track_status` は
+        TRACK_STATUS を送る API であるため、状態の照会はこの名前で行う。全件は
+        `track_status_requests()` で取得する。値は状態機械のスナップショットであり、
+        参照しても状態は変化しない。
+        """
+        return self._require_runtime().track_status_state(request_id)
+
+    def track_status_requests(self) -> dict[int, dict[str, object]]:
+        """自側が保持する全 TRACK_STATUS の状態を Request ID をキーにして返す。
+
+        値は状態機械のスナップショットであり、参照しても状態は変化しない。
+        """
+        return self._require_runtime().track_status_requests()
+
     def on_publish_state_notify(
         self,
         callback: Callable[[dict[int, object]], Awaitable[None]],

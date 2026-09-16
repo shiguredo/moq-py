@@ -86,6 +86,21 @@ def _subscribe_round_trip(
     return request_id
 
 
+def _fetch_round_trip(client: Session, server: Session, stream_id: int) -> int:
+    """FETCH を送り、FETCH_OK を受け取るまでを往復させる。
+
+    購読と同じ Track への FETCH は、まだ配信実績が無い間は DOES_NOT_EXIST で
+    拒否されるため、購読とは別の Track を使う。
+    """
+    events = client.send_fetch([b"fetch-ns"], b"fetch-track", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(stream_id, request_id)
+    server.receive_request_stream(stream_id, _message_data(events[0]), "peer")
+    ok = server.send_fetch_ok(request_id, False, (0, 0), {}, {})
+    client.receive_request_stream(stream_id, _message_data(ok[0]), "local")
+    return request_id
+
+
 def test_request_stream_close_is_reported_for_a_local_request() -> None:
     """
     自側が開始した request stream の終端がセッションへ通知されることを確認する。
@@ -1475,6 +1490,308 @@ def test_grease_generate_uses_the_standard_random_by_default() -> None:
     assert all(value <= moqt.GREASE_MAX for value in values)
     # 毎回同じ値では乱数源として機能していない
     assert len(values) > 1
+
+
+# ─── セッション状態の照会 ───────────────────────────────────
+
+
+def test_session_state_accessors_report_peer_declared_values() -> None:
+    """peer が宣言した値とセッションのタイムアウト設定を照会できることを確認する。
+
+    SETUP で受け取った値はキャッシュせず、状態機械から都度取得する
+    (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+    """
+    client = Session.client("c", {moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE: 4096})
+    server = Session.server("s")
+    client_setup = client.start()
+    server_setup = server.start()
+    server.receive_control(client_setup)
+    client.receive_control(server_setup)
+
+    # client から見た peer の宣言値。server は宣言していないため 0 になる
+    assert client.peer_max_auth_token_cache_size == 0
+    # server から見た peer の宣言値
+    assert server.peer_max_auth_token_cache_size == 4096
+
+    # 期限は既定では無効であり、設定した値がそのまま読める
+    assert client.control_message_timeout_ms is None
+    assert client.data_stream_timeout_ms is None
+    client.set_control_message_timeout_ms(1500)
+    client.set_data_stream_timeout_ms(2500)
+    assert client.control_message_timeout_ms == 1500
+    assert client.data_stream_timeout_ms == 2500
+
+    # alias の保持期間は既定値を持ち、変更した値がそのまま読める
+    assert client.peer_alias_retention_ms == moqt.DEFAULT_PEER_ALIAS_RETENTION_MS
+    client.set_peer_alias_retention_ms(1000)
+    assert client.peer_alias_retention_ms == 1000
+
+
+def test_subscription_state_accessors_report_the_subscription() -> None:
+    """subscription の状態を Request ID から照会できることを確認する。
+
+    一覧は Request ID をキーにした辞書であり、保持していない Request ID は `None` に
+    なる。publisher 側と subscriber 側で `my_role` が入れ替わる。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    entry = client.subscription(request_id)
+    assert entry is not None
+    assert entry["request_id"] == request_id
+    assert entry["track_alias"] == 1
+    assert entry["namespace"] == [b"ns"]
+    assert entry["track_name"] == b"t"
+    assert entry["state"] == "established"
+    assert entry["my_role"] == "subscriber"
+    assert entry["initiator"] == "subscriber"
+    # FORWARD パラメータを省略した場合は送る側の既定値 1 になる
+    # (draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter))
+    assert entry["forward"] is True
+    assert entry["subscriber_priority"] is None
+    assert entry["group_order"] is None
+    assert entry["largest_location"] is None
+    assert entry["largest_received_location"] is None
+
+    # 一覧は Request ID をキーにして同じ内容を返す
+    assert client.subscriptions() == {request_id: entry}
+    # 保持していない Request ID は取得できない
+    assert client.subscription(request_id + 100) is None
+
+    # 同じ subscription が publisher 側からは publisher として見える
+    publisher_entry = server.subscription(request_id)
+    assert publisher_entry is not None
+    assert publisher_entry["my_role"] == "publisher"
+    assert publisher_entry["initiator"] == "subscriber"
+
+
+def test_subscription_state_accessor_reports_a_pending_subscription() -> None:
+    """SUBSCRIBE_OK を受信する前の subscription が Pending として見えることを確認する。"""
+    client, server = _setup()
+    events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+
+    entry = client.subscription(request_id)
+    assert entry is not None
+    assert entry["state"] == "pending"
+    # alias は SUBSCRIBE_OK を受信するまで確定しない
+    assert entry["track_alias"] is None
+
+    # SUBSCRIBE_OK を受信すると Established になり alias が入る
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    ok = server.send_subscribe_ok(request_id, 7, {}, {})
+    client.receive_request_stream(4, _message_data(ok[0]), "local")
+
+    established = client.subscription(request_id)
+    assert established is not None
+    assert established["state"] == "established"
+    assert established["track_alias"] == 7
+
+
+def test_fetch_state_accessors_report_the_fetch() -> None:
+    """fetch の状態を Request ID から照会できることを確認する。"""
+    client, server = _setup()
+    request_id = _fetch_round_trip(client, server, 4)
+
+    entry = client.fetch(request_id)
+    assert entry is not None
+    assert entry["request_id"] == request_id
+    assert entry["state"] == "established"
+    assert entry["my_role"] == "subscriber"
+    assert entry["namespace"] == [b"fetch-ns"]
+    assert entry["track_name"] == b"fetch-track"
+    # FETCH_OK で確定した終端情報が入る
+    # (draft-ietf-moq-transport-21 §9.12 (FETCH_OK))
+    assert entry["end_location"] == (0, 0)
+    assert entry["end_of_track"] is False
+    assert entry["response_received"] is True
+
+    assert client.fetches() == {request_id: entry}
+    assert client.fetch(request_id + 100) is None
+
+    # publisher 側からは publisher として見える
+    publisher_entry = server.fetch(request_id)
+    assert publisher_entry is not None
+    assert publisher_entry["my_role"] == "publisher"
+
+
+def test_track_status_state_accessors_report_the_response() -> None:
+    """TRACK_STATUS の状態を Request ID から照会できることを確認する。
+
+    TRACK_STATUS は relay が応答する request であり、moqt-rs は送信側だけを扱う
+    (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。応答が届かないまま
+    request stream が終端すると、状態機械は応答をエラーとして記録する。
+    """
+    client, _server = _setup()
+    events = client.send_track_status([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+
+    entry = client.track_status_request(request_id)
+    assert entry is not None
+    assert entry["request_id"] == request_id
+    assert entry["namespace"] == [b"ns"]
+    assert entry["track_name"] == b"t"
+    # 応答が届くまでは pending である
+    assert entry["response"] == "pending"
+    assert entry["largest_location"] is None
+
+    assert client.track_status_requests() == {request_id: entry}
+    assert client.track_status_request(request_id + 100) is None
+
+    # 応答前に request stream が終端するとエラーとして記録される
+    client.receive_request_stream_closed(4, False, None)
+    closed = client.track_status_request(request_id)
+    assert closed is not None
+    assert closed["response"] == "error"
+    assert closed["largest_location"] is None
+
+
+def test_track_status_state_accessor_reports_an_ok_response() -> None:
+    """TRACK_STATUS の応答が届いた場合に ok と LARGEST_OBJECT が読めることを確認する。
+
+    状態機械は TRACK_STATUS の受信側を扱わないため、relay が返す REQUEST_OK を
+    このテストでは再現できない。そこで購読の REQUEST_UPDATE_OK として同じ codec に
+    REQUEST_OK を生成させ、TRACK_STATUS を登録した request stream へ流し込む。
+    REQUEST_OK は wire 上に Request ID を持たず、受信側はストリームに紐付けた
+    Request ID で応答先を決めるため、同じバイト列が TRACK_STATUS の応答として解釈される
+    (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))。
+    """
+    client, server = _setup()
+    status_events = client.send_track_status([b"ns"], b"t", {})
+    status_request_id = _request_id(status_events[0])
+    client.register_local_request_stream(4, status_request_id)
+
+    # 別の request stream で購読を確立し、REQUEST_UPDATE を送る
+    subscribe_events = client.send_subscribe([b"ns"], b"t", {})
+    subscription_request_id = _request_id(subscribe_events[0])
+    client.register_local_request_stream(8, subscription_request_id)
+    server.receive_request_stream(8, _message_data(subscribe_events[0]), "peer")
+    accepted = server.send_subscribe_ok(subscription_request_id, 1, {}, {})
+    client.receive_request_stream(8, _message_data(accepted[0]), "local")
+    update_events = client.send_request_update(
+        subscription_request_id, {moqt.PARAM_SUBSCRIBER_PRIORITY: 100}
+    )
+    server.receive_request_stream(8, _message_data(update_events[0]), "peer")
+
+    # REQUEST_UPDATE_OK は LARGEST_OBJECT を運べる
+    # (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter))
+    ok = server.send_request_ok(
+        subscription_request_id,
+        {moqt.PARAM_LARGEST_OBJECT: (3, 4)},
+        {},
+    )
+
+    # 同じ REQUEST_OK を TRACK_STATUS の応答として流し込む
+    client.receive_request_stream(4, _message_data(ok[0]), "local")
+
+    entry = client.track_status_request(status_request_id)
+    assert entry is not None
+    assert entry["response"] == "ok"
+    assert entry["largest_location"] == (3, 4)
+
+
+def test_goaway_drain_accessors_report_blocking_requests() -> None:
+    """GOAWAY の drain を妨げている request を照会できることを確認する。
+
+    購読が cleanup 可能になるまで drain は完了せず、妨げている Request ID が
+    snapshot に入る (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration))。
+    """
+    client, server = _setup()
+    subscription_request_id = _subscribe_round_trip(client, server, 4)
+    fetch_request_id = _fetch_round_trip(client, server, 8)
+    status_events = client.send_track_status([b"ns"], b"t", {})
+    status_request_id = _request_id(status_events[0])
+    client.register_local_request_stream(12, status_request_id)
+
+    assert client.goaway_drain_ready() is False
+    snapshot = client.goaway_drain_snapshot()
+    assert snapshot["blocking_subscription_request_ids"] == [subscription_request_id]
+    assert snapshot["blocking_fetch_request_ids"] == [fetch_request_id]
+    assert snapshot["blocking_track_status_request_ids"] == [status_request_id]
+
+    # 応答前に request stream が終端した TRACK_STATUS は drain を妨げない
+    client.receive_request_stream_closed(12, False, None)
+    assert client.goaway_drain_snapshot()["blocking_track_status_request_ids"] == []
+
+    # 購読を終了して破棄すると、その購読は drain を妨げなくなる
+    client.stop_sending(subscription_request_id)
+    assert client.forget_subscription(subscription_request_id) is True
+    assert client.goaway_drain_snapshot()["blocking_subscription_request_ids"] == []
+
+    assert client.goaway_drain_ready() is False
+    # fetch を cancel して破棄すると drain が完了する
+    client.send_fetch_stop_sending(fetch_request_id)
+    assert client.forget_fetch(fetch_request_id) is True
+    assert client.goaway_drain_ready() is True
+    assert client.goaway_drain_snapshot() == {
+        "blocking_subscription_request_ids": [],
+        "blocking_fetch_request_ids": [],
+        "blocking_track_status_request_ids": [],
+    }
+
+
+def test_open_outgoing_fill_stream_count_reports_open_streams() -> None:
+    """open 中の送信 fill fetch stream 数を照会できることを確認する。
+
+    fill fetch stream は publisher が開き、1 つの subscription に複数本が同時に
+    開くことがある。stream を終端すると索引から外れる
+    (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+    # fill fetch stream を開いていない状態では 0 本である
+    assert server.open_outgoing_fill_stream_count(request_id) == 0
+    assert server.open_outgoing_fill_stream_count(request_id + 100) == 0
+    # subscriber 側は fill fetch stream を開かない
+    assert client.open_outgoing_fill_stream_count(request_id) == 0
+
+    # publisher が fill fetch stream を開くと本数が増える
+    server.send_fill_fetch_header(12, request_id)
+    assert server.open_outgoing_fill_stream_count(request_id) == 1
+
+    # 終端した stream は open 中の本数に数えない
+    server.send_fetch_data_stream_closed(12)
+    assert server.open_outgoing_fill_stream_count(request_id) == 0
+
+
+def test_session_state_accessors_do_not_change_the_session() -> None:
+    """照会を繰り返してもセッションの状態が変化しないことを確認する。
+
+    getter は状態機械の読み出しだけを行い、イベントを生成しない。照会の後も
+    新しい request を往復できることで、状態機械が壊れていないことを確かめる。
+    """
+    client, server = _setup()
+    request_id = _subscribe_round_trip(client, server, 4)
+
+    def snapshot() -> tuple[object, ...]:
+        """照会系 API が返す値をすべて集める。"""
+        return (
+            client.state(),
+            client.established,
+            client.last_error,
+            client.peer_max_auth_token_cache_size,
+            client.peer_alias_retention_ms,
+            client.control_message_timeout_ms,
+            client.data_stream_timeout_ms,
+            client.goaway_drain_ready(),
+            client.goaway_drain_snapshot(),
+            client.subscriptions(),
+            client.fetches(),
+            client.track_status_requests(),
+            client.open_outgoing_fill_stream_count(request_id),
+            client.subscription(request_id),
+        )
+
+    # 2 回目以降の照会でも同じ内容が返る
+    assert snapshot() == snapshot()
+
+    # 照会の後も状態機械は request を往復できる
+    second_request_id = _subscribe_round_trip(client, server, 8, track_alias=2)
+    assert second_request_id != request_id
+    assert set(client.subscriptions()) == {request_id, second_request_id}
+    assert client.state() == "established"
 
 
 # ─── セッションの既定値 ─────────────────────────────────────

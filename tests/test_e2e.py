@@ -404,6 +404,124 @@ async def test_session_timeouts_can_be_configured(
     assert client.established
 
 
+async def test_session_state_accessors_report_the_live_session(
+    moq_certificates: tuple[str, str],
+) -> None:
+    """
+    確立したセッションの内部状態を高レベル API から照会できることを確認する。
+
+    peer が SETUP で宣言した値はキャッシュせず状態機械から都度取得する。購読と fetch の
+    状態は Request ID をキーにした辞書で返り、GOAWAY の drain を妨げている request も
+    参照できる (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE) /
+    §6.6.1 (Graceful Session Migration))。
+    """
+    certfile, keyfile = moq_certificates
+    server = Server(
+        host="127.0.0.1",
+        port=0,
+        certfile=certfile,
+        keyfile=keyfile,
+        setup_options={moqt.SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE: 1024},
+    )
+    await server.start()
+    run_task = asyncio.create_task(server.run())
+    client: Client | None = None
+    try:
+        sessions: list[ServerSession] = []
+        established = asyncio.Event()
+        published: list[Publication] = []
+        fetched = asyncio.Event()
+
+        async def on_session_established(session: ServerSession) -> None:
+            sessions.append(session)
+            established.set()
+
+        async def on_subscribe(request: SubscriptionRequest) -> None:
+            published.append(await request.subscribe_ok(TRACK_ALIAS))
+
+        async def on_fetch(request: FetchRequest) -> None:
+            response = await request.respond((1, 1), end_of_track=True)
+            await response.close()
+            fetched.set()
+
+        server.on_session_established(on_session_established)
+        server.on_subscribe(on_subscribe)
+        server.on_fetch(on_fetch)
+
+        client = Client(
+            url=f"https://127.0.0.1:{server.actual_port}/webtransport",
+            verify_peer=False,
+        )
+        await client.connect()
+        await asyncio.wait_for(established.wait(), timeout=OBJECT_TIMEOUT)
+
+        # client から見た peer (server) の宣言値であり、SETUP の値がそのまま読める
+        assert client.peer_max_auth_token_cache_size == 1024
+        # server から見た peer (client) の宣言値は無いため 0 になる
+        assert sessions[0].peer_max_auth_token_cache_size == 0
+
+        # alias の保持期間は設定した値が読める
+        client.set_peer_alias_retention_ms(2000)
+        assert client.peer_alias_retention_ms == 2000
+
+        # 購読が無い状態では fill fetch stream も drain も残っていない
+        assert sessions[0].runtime.open_outgoing_fill_stream_count(0) == 0
+        assert client.goaway_drain_ready is True
+
+        # 購読を確立すると状態機械の subscription が観測できる
+        subscription = await client.subscribe(NAMESPACE, TRACK_NAME)
+        await wait_until(lambda: bool(published))
+
+        entry = client.subscription_state(subscription.request_id)
+        assert entry is not None
+        assert entry["state"] == "established"
+        assert entry["track_alias"] == TRACK_ALIAS
+        assert entry["namespace"] == NAMESPACE
+        assert entry["track_name"] == TRACK_NAME
+        assert entry["my_role"] == "subscriber"
+        assert entry["forward"] is True
+        assert client.subscriptions() == {subscription.request_id: entry}
+        # 保持していない Request ID は取得できない
+        assert client.subscription_state(subscription.request_id + 100) is None
+
+        # 同じ subscription が publisher 側からは publisher として見える
+        publisher_entry = sessions[0].subscription_state(subscription.request_id)
+        assert publisher_entry is not None
+        assert publisher_entry["my_role"] == "publisher"
+
+        # 確立中の購読は GOAWAY の drain を妨げる
+        assert client.goaway_drain_ready is False
+        assert client.goaway_drain_snapshot()["blocking_subscription_request_ids"] == [
+            subscription.request_id
+        ]
+
+        # 購読を終了すると drain が完了する
+        await subscription.close()
+        await wait_until(lambda: client.goaway_drain_ready)
+        assert client.goaway_drain_snapshot()["blocking_subscription_request_ids"] == []
+        # 照会はセッションを終わらせない
+        assert client.established is True
+
+        # fetch を確立すると fetch の状態も観測できる
+        fetch = await client.fetch(NAMESPACE, b"fetched")
+        await asyncio.wait_for(fetched.wait(), timeout=OBJECT_TIMEOUT)
+
+        fetch_entry = client.fetch_state(fetch.request_id)
+        assert fetch_entry is not None
+        assert fetch_entry["my_role"] == "subscriber"
+        assert fetch_entry["track_name"] == b"fetched"
+        assert client.fetches() == {fetch.request_id: fetch_entry}
+        # TRACK_STATUS は送っていないため空である
+        assert client.track_status_requests() == {}
+    finally:
+        if client is not None:
+            await client.close()
+        await server.stop()
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+
+
 async def test_server_goaway_is_notified_to_the_client(moq_pair: MoqPair) -> None:
     """
     server の GOAWAY が client へ通知されることを確認する。

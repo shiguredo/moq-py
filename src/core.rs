@@ -43,9 +43,10 @@ use shiguredo_moqt::parameter::{
 };
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{
-    DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DatagramAcceptance, RequestKind,
-    RequestStreamEnd, SessionEvent, SessionState, TerminationReason, TrackDataAcceptance,
-    Transport,
+    DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DatagramAcceptance, Fetch, FetchState,
+    RequestKind, RequestStreamEnd, SessionEvent, SessionState, Subscription, SubscriptionInitiator,
+    SubscriptionState, TerminationReason, TrackDataAcceptance, TrackRole, TrackStatusEntry,
+    TrackStatusResponse, Transport,
 };
 use shiguredo_moqt::stream::DataStreamType;
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
@@ -512,6 +513,144 @@ fn track_data_acceptance_to_python(acceptance: TrackDataAcceptance) -> &'static 
         TrackDataAcceptance::Discarded => "discarded",
         TrackDataAcceptance::FilteredOut => "filtered_out",
     }
+}
+
+/// `SubscriptionState` を Python 側の文字列へ変換する。
+fn subscription_state_to_python(state: SubscriptionState) -> &'static str {
+    match state {
+        SubscriptionState::Pending => "pending",
+        SubscriptionState::Established => "established",
+        SubscriptionState::Terminated => "terminated",
+    }
+}
+
+/// `FetchState` を Python 側の文字列へ変換する。
+fn fetch_state_to_python(state: FetchState) -> &'static str {
+    match state {
+        FetchState::Pending => "pending",
+        FetchState::Established => "established",
+        FetchState::Terminated => "terminated",
+    }
+}
+
+/// `TrackRole` を Python 側の文字列へ変換する。
+fn track_role_to_python(role: TrackRole) -> &'static str {
+    match role {
+        TrackRole::Publisher => "publisher",
+        TrackRole::Subscriber => "subscriber",
+    }
+}
+
+/// `SubscriptionInitiator` を Python 側の文字列へ変換する。
+fn subscription_initiator_to_python(initiator: SubscriptionInitiator) -> &'static str {
+    match initiator {
+        SubscriptionInitiator::Subscriber => "subscriber",
+        SubscriptionInitiator::Publisher => "publisher",
+    }
+}
+
+/// `Location` を Python の `(group_id, object_id)` へ変換する。
+///
+/// 状態機械は未確定の位置を `None` で表すため、`None` はそのまま `None` になる。
+fn location_to_python(location: Option<&Location>) -> Option<(u64, u64)> {
+    location.map(|location| (location.group_id, location.object_id))
+}
+
+/// 状態機械が保持する subscription 1 件を辞書へ書き出す。
+///
+/// 値はすべて状態機械から読んだスナップショットであり、参照しても状態は変化しない。
+fn subscription_to_python(py: Python<'_>, subscription: &Subscription) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("request_id", subscription.request_id)?;
+    dict.set_item("track_alias", subscription.track_alias)?;
+    dict.set_item(
+        "namespace",
+        track_namespace_to_python(py, &subscription.track_namespace)?,
+    )?;
+    dict.set_item("track_name", PyBytes::new(py, &subscription.track_name))?;
+    dict.set_item("state", subscription_state_to_python(subscription.state))?;
+    dict.set_item("my_role", track_role_to_python(subscription.my_role))?;
+    dict.set_item(
+        "initiator",
+        subscription_initiator_to_python(subscription.initiator),
+    )?;
+    // Forward State は 0 = 送らない / 1 = 送る の 2 値である
+    // (draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter))。
+    // draft 由来の値であり、将来の改訂で変更される可能性がある
+    dict.set_item("forward", subscription.forward_state != 0)?;
+    dict.set_item("subscriber_priority", subscription.subscriber_priority)?;
+    dict.set_item("group_order", subscription.group_order)?;
+    dict.set_item(
+        "largest_location",
+        location_to_python(subscription.largest_location.as_ref()),
+    )?;
+    dict.set_item(
+        "largest_received_location",
+        location_to_python(subscription.largest_received_location.as_ref()),
+    )?;
+    Ok(dict.unbind())
+}
+
+/// 状態機械が保持する fetch 1 件を辞書へ書き出す。
+///
+/// 値はすべて状態機械から読んだスナップショットであり、参照しても状態は変化しない。
+fn fetch_to_python(py: Python<'_>, fetch: &Fetch) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("request_id", fetch.request_id)?;
+    dict.set_item("state", fetch_state_to_python(fetch.state))?;
+    dict.set_item("my_role", track_role_to_python(fetch.my_role))?;
+    dict.set_item(
+        "namespace",
+        fetch
+            .track_namespace
+            .as_ref()
+            .map(|namespace| track_namespace_to_python(py, namespace))
+            .transpose()?,
+    )?;
+    dict.set_item(
+        "track_name",
+        fetch
+            .track_name
+            .as_deref()
+            .map(|name| PyBytes::new(py, name)),
+    )?;
+    dict.set_item(
+        "fetch_start",
+        location_to_python(fetch.fetch_start.as_ref()),
+    )?;
+    dict.set_item(
+        "end_location",
+        location_to_python(fetch.end_location.as_ref()),
+    )?;
+    dict.set_item("end_of_track", fetch.end_of_track)?;
+    dict.set_item("response_received", fetch.response_received)?;
+    Ok(dict.unbind())
+}
+
+/// 状態機械が保持する TRACK_STATUS 1 件を辞書へ書き出す。
+///
+/// 値はすべて状態機械から読んだスナップショットであり、参照しても状態は変化しない。
+fn track_status_to_python(py: Python<'_>, entry: &TrackStatusEntry) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("request_id", entry.request_id)?;
+    dict.set_item(
+        "namespace",
+        track_namespace_to_python(py, &entry.track_namespace)?,
+    )?;
+    dict.set_item("track_name", PyBytes::new(py, &entry.track_name))?;
+    // 応答は未受信 (None) / TRACK_STATUS_OK / REQUEST_ERROR の 3 通りである
+    // (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
+    // draft 由来の値であり、将来の改訂で変更される可能性がある
+    let (response, largest_location) = match &entry.response {
+        None => ("pending", None),
+        Some(TrackStatusResponse::Ok { largest_location }) => {
+            ("ok", location_to_python(largest_location.as_ref()))
+        }
+        Some(TrackStatusResponse::Error) => ("error", None),
+    };
+    dict.set_item("response", response)?;
+    dict.set_item("largest_location", largest_location)?;
+    Ok(dict.unbind())
 }
 
 /// REQUEST_ERROR の内容を辞書へ書き出す。
@@ -2203,6 +2342,162 @@ impl CoreSession {
             shiguredo_moqt::session::types::Role::Client => "client",
             shiguredo_moqt::session::types::Role::Server => "server",
         }
+    }
+
+    /// peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を返す。
+    ///
+    /// 宣言が無い場合は 0 を返す。SETUP で受け取った値はキャッシュせず、状態機械から
+    /// 都度取得する
+    /// (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+    /// draft 由来の値であり、将来の改訂で変更される可能性がある。
+    #[getter]
+    fn peer_max_auth_token_cache_size(&self) -> u64 {
+        self.session.peer_max_auth_token_cache_size()
+    }
+
+    /// キャンセル済み peer publisher alias の保持期間 (ms) を返す。
+    ///
+    /// draft-ietf-moq-transport-21 §3.1.2 (Track Alias) の SHOULD に対応する保持期間であり、
+    /// draft 由来の値であるため将来の改訂で変更される可能性がある。
+    #[getter]
+    fn peer_alias_retention_ms(&self) -> u64 {
+        self.session.peer_alias_retention_ms()
+    }
+
+    /// キャンセル済み peer publisher alias の保持期間 (ms) を設定する。
+    ///
+    /// 0 を設定すると保持は実質無効になる。既に登録済みの保持期限は変わらない。
+    fn set_peer_alias_retention_ms(&mut self, retention_ms: u64) {
+        self.session.set_peer_alias_retention_ms(retention_ms);
+    }
+
+    /// 制御メッセージの応答待ちタイムアウト (ms) を返す。
+    ///
+    /// 無効の場合は `None` を返す
+    /// (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+    /// draft 由来の値であり、将来の改訂で変更される可能性がある。
+    #[getter]
+    fn control_message_timeout_ms(&self) -> Option<u64> {
+        self.session.control_message_timeout_ms()
+    }
+
+    /// データストリームの停止を検出するタイムアウト (ms) を返す。
+    ///
+    /// 無効の場合は `None` を返す
+    /// (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))。
+    /// draft 由来の値であり、将来の改訂で変更される可能性がある。
+    #[getter]
+    fn data_stream_timeout_ms(&self) -> Option<u64> {
+        self.session.data_stream_timeout_ms()
+    }
+
+    /// GOAWAY の drain を妨げている request を返す。
+    ///
+    /// 自側が GOAWAY を送った後、返る Request ID の request がすべて破棄可能に
+    /// なるまで drain は完了しない。キーは
+    /// `blocking_subscription_request_ids` / `blocking_fetch_request_ids` /
+    /// `blocking_track_status_request_ids` であり、値は Request ID のリストである
+    /// (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration) /
+    /// §9.2 (GOAWAY))。draft 由来の仕様であり、将来の改訂で変更される可能性がある。
+    fn goaway_drain_snapshot(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let snapshot = self.session.goaway_drain_snapshot();
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "blocking_subscription_request_ids",
+            snapshot.blocking_subscription_request_ids,
+        )?;
+        dict.set_item(
+            "blocking_fetch_request_ids",
+            snapshot.blocking_fetch_request_ids,
+        )?;
+        dict.set_item(
+            "blocking_track_status_request_ids",
+            snapshot.blocking_track_status_request_ids,
+        )?;
+        Ok(dict.unbind())
+    }
+
+    /// GOAWAY の drain が完了しているかを返す。
+    ///
+    /// drain を妨げる request が 1 件も無ければ `True` である
+    /// (draft-ietf-moq-transport-21 §6.6.1 (Graceful Session Migration))。
+    /// draft 由来の仕様であり、将来の改訂で変更される可能性がある。
+    fn goaway_drain_ready(&self) -> bool {
+        self.session.goaway_drain_ready()
+    }
+
+    /// 指定 subscription で open 中の送信 fill fetch stream 数を返す。
+    ///
+    /// 1 つの subscription に複数本の fill fetch stream が同時に開くことがある
+    /// (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。draft 由来の仕様であり、
+    /// 将来の改訂で変更される可能性がある。
+    fn open_outgoing_fill_stream_count(&self, request_id: u64) -> u64 {
+        // Python の int へは u64 として渡す (既知の小さな本数なので桁落ちは起きない)
+        self.session.open_outgoing_fill_stream_count(request_id) as u64
+    }
+
+    /// 指定 Request ID の subscription の状態を返す。
+    ///
+    /// 保持していない Request ID の場合は `None` を返す。
+    fn subscription(&self, py: Python<'_>, request_id: u64) -> PyResult<Option<Py<PyDict>>> {
+        self.session
+            .subscription(request_id)
+            .map(|subscription| subscription_to_python(py, subscription))
+            .transpose()
+    }
+
+    /// 自側が保持する全 subscription の状態を Request ID をキーにした辞書で返す。
+    fn subscriptions(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dict = PyDict::new(py);
+        for subscription in self.session.subscriptions() {
+            dict.set_item(
+                subscription.request_id,
+                subscription_to_python(py, subscription)?,
+            )?;
+        }
+        Ok(dict.unbind())
+    }
+
+    /// 指定 Request ID の fetch の状態を返す。
+    ///
+    /// 保持していない Request ID の場合は `None` を返す。
+    fn fetch(&self, py: Python<'_>, request_id: u64) -> PyResult<Option<Py<PyDict>>> {
+        self.session
+            .fetch(request_id)
+            .map(|fetch| fetch_to_python(py, fetch))
+            .transpose()
+    }
+
+    /// 自側が保持する全 fetch の状態を Request ID をキーにした辞書で返す。
+    fn fetches(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dict = PyDict::new(py);
+        for fetch in self.session.fetches() {
+            dict.set_item(fetch.request_id, fetch_to_python(py, fetch)?)?;
+        }
+        Ok(dict.unbind())
+    }
+
+    /// 指定 Request ID の TRACK_STATUS の状態を返す。
+    ///
+    /// 保持していない Request ID の場合は `None` を返す。
+    fn track_status_request(
+        &self,
+        py: Python<'_>,
+        request_id: u64,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        self.session
+            .track_status_request(request_id)
+            .map(|entry| track_status_to_python(py, entry))
+            .transpose()
+    }
+
+    /// 自側が保持する全 TRACK_STATUS の状態を Request ID をキーにした辞書で返す。
+    fn track_status_requests(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dict = PyDict::new(py);
+        for entry in self.session.track_status_requests() {
+            dict.set_item(entry.request_id, track_status_to_python(py, entry)?)?;
+        }
+        Ok(dict.unbind())
     }
 
     /// request_id に対応する subscription の track alias を返す。
