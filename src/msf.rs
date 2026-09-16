@@ -63,6 +63,17 @@ fn packaging_from_string(value: &str) -> PyResult<MsfPackaging> {
     }
 }
 
+/// `Option` を Python の値と同じ表記で書き出す。
+///
+/// `repr` は対話環境やログ、テストの失敗メッセージに出る。Rust の `Some(..)` ではなく
+/// Python の `None` と同じ表記にして、利用者が Python の値として読めるようにする。
+fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "None".to_string(),
+    }
+}
+
 /// MSF カタログ。
 ///
 /// draft-ietf-moq-msf-01 §5 (Catalog) の完全カタログである。delta 更新は
@@ -436,8 +447,10 @@ impl Buffers {
 
     fn __repr__(&self) -> String {
         format!(
-            "Buffers(target={:?}, min={:?}, max={:?})",
-            self.target, self.min, self.max
+            "Buffers(target={}, min={}, max={})",
+            format_optional(self.target),
+            format_optional(self.min),
+            format_optional(self.max)
         )
     }
 
@@ -744,8 +757,9 @@ impl RemoveTrack {
 
     fn __repr__(&self) -> String {
         format!(
-            "RemoveTrack(name={}, namespace={:?})",
-            self.name, self.namespace
+            "RemoveTrack(name={}, namespace={})",
+            self.name,
+            format_optional(self.namespace.as_deref())
         )
     }
 

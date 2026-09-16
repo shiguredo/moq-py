@@ -391,6 +391,36 @@ def test_catalog_builds_a_publish_track() -> None:
     assert encoded.publish_tracks == [{"name": "publish", "packaging": "loc", "isLive": True}]
 
 
+def test_builders_repr_omit_rust_option_notation() -> None:
+    """
+    構築 API の repr が Rust の Option 表記を含まないことを確認する。
+
+    repr は対話環境やログ、テストの失敗メッセージに出る。省略できる値は Python と
+    同じ `None` と表示され、値があるときは値そのものが表示される
+    (draft-ietf-moq-msf-01 §5.1.6 (Delta update) / §5.2.9 (Buffers))。
+    """
+    # 省略できる値を持つ API は、値があるときは値そのもの、無いときは None と表示される
+    assert repr(RemoveTrack("video", "ns")) == "RemoveTrack(name=video, namespace=ns)"
+    assert repr(RemoveTrack("video")) == "RemoveTrack(name=video, namespace=None)"
+    assert repr(Buffers(100, 50, 200)) == "Buffers(target=100, min=50, max=200)"
+    assert repr(Buffers(100)) == "Buffers(target=100, min=None, max=None)"
+    assert repr(Buffers()) == "Buffers(target=None, min=None, max=None)"
+
+    # 省略できる値を持たない API の repr にも Rust の Option 表記が現れない
+    builders = [
+        Track("video", "loc", True),
+        CloneTrack("clone", "video"),
+        InitData("init", "AA=="),
+        Template(1000, 33, 1, 0, 1, 2, 5000, 33),
+        AuthInfo("bearer", b"{}"),
+        Accessibility("urn:example:scheme", "value"),
+        Catalog(),
+        DeltaUpdate(),
+    ]
+    for builder in builders:
+        assert "Some(" not in repr(builder)
+
+
 def test_catalog_rejects_an_unknown_packaging() -> None:
     """
     draft が定めない packaging を持つトラックの追加を拒否することを確認する。
