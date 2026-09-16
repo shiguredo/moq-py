@@ -84,7 +84,9 @@ mod _native {
 
     // MOQT の Properties の codec (moqt.moqt)
     #[pymodule_export]
-    use crate::properties::{ObjectProperties, TrackProperties};
+    use crate::properties::{
+        ObjectProperties, ObjectPropertiesIterator, TrackProperties, TrackPropertiesIterator,
+    };
 
     // MSF の codec (moqt.msf)
     #[pymodule_export]

@@ -671,6 +671,147 @@ def test_track_properties_detects_an_unknown_mandatory_property() -> None:
     assert properties.has_unknown_mandatory is True
 
 
+def test_track_properties_round_trip() -> None:
+    """Track Properties の encode / decode が往復することを確認する。
+
+    Track Properties には長さプレフィックスが無く、encode 結果はセッションが運ぶ
+    KVP 列そのものになる (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    """
+    properties = TrackProperties()
+    properties.add(moqt.PROP_DEFAULT_PUBLISHER_PRIORITY, 200)
+    properties.add(0x0D, b"\x01\x02\x03")
+    properties.add(0x20, 5)
+
+    encoded = properties.encode()
+    decoded = TrackProperties.decode(encoded)
+
+    assert decoded == properties
+    assert decoded.encode() == encoded
+    assert decoded.to_dict() == {
+        moqt.PROP_DEFAULT_PUBLISHER_PRIORITY: 200,
+        0x0D: b"\x01\x02\x03",
+        0x20: 5,
+    }
+    # decode 後はワイヤ上の型番号の昇順で列挙される
+    assert decoded.items() == [
+        (0x0D, b"\x01\x02\x03"),
+        (moqt.PROP_DEFAULT_PUBLISHER_PRIORITY, 200),
+        (0x20, 5),
+    ]
+
+
+def test_track_properties_encode_of_an_empty_set_is_empty() -> None:
+    """空の Track Properties が 0 バイトへエンコードされることを確認する。
+
+    Track scope のプロパティは任意であり、省略時は長さプレフィックスも書かない
+    (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    """
+    assert TrackProperties().encode() == b""
+    assert len(TrackProperties.decode(b"")) == 0
+
+
+def test_track_properties_rejects_a_duplicate_type() -> None:
+    """同一の型番号を 2 度持つ Track Properties を encode が拒否することを確認する。
+
+    型番号は delta encoding の差分 0 で表現され、受信側では重複として扱われる
+    (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+    """
+    properties = TrackProperties()
+    properties.add(0x20, 1)
+    properties.add(0x20, 2)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        properties.encode()
+
+
+def test_track_properties_rejects_a_nested_immutable_properties() -> None:
+    """入れ子の IMMUTABLE_PROPERTIES を decode が拒否することを確認する。
+
+    (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))
+    """
+    # 内側に 0x0B 自身を含む KVP 列を IMMUTABLE_PROPERTIES の値として組み立てる
+    inner = encode_varint(moqt.PROP_IMMUTABLE_PROPERTIES) + encode_varint(0)
+    encoded = encode_varint(moqt.PROP_IMMUTABLE_PROPERTIES) + encode_varint(len(inner)) + inner
+
+    with pytest.raises(ValueError, match="nested IMMUTABLE_PROPERTIES"):
+        TrackProperties.decode(encoded)
+
+
+def test_track_properties_rejects_a_truncated_value() -> None:
+    """途中で切れた Track Properties を decode が拒否することを確認する。"""
+    properties = TrackProperties()
+    properties.add(0x0D, b"\x01\x02\x03")
+
+    with pytest.raises(ValueError, match="unexpected end of buffer"):
+        TrackProperties.decode(properties.encode()[:-1])
+
+
+def test_track_properties_encode_rejects_a_type_value_parity_mismatch() -> None:
+    """型番号と値の形式が食い違う Track Property を encode が拒否することを確認する。
+
+    偶数型は varint、奇数型は長さ付きバイト列である
+    (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    """
+    properties = TrackProperties()
+    properties.add(0x20, b"\x01")
+
+    with pytest.raises(ValueError, match="invalid parameter"):
+        properties.encode()
+
+
+def test_object_properties_iteration_matches_items() -> None:
+    """`ObjectProperties` の列挙と `items()` が同じ列を返すことを確認する。"""
+    properties = ObjectProperties()
+    properties.add(PROP_PRIOR_GROUP_ID_GAP, 2)
+    properties.add(0x0D, b"\x01\x02")
+
+    assert list(properties) == [(PROP_PRIOR_GROUP_ID_GAP, 2), (0x0D, b"\x01\x02")]
+    assert properties.items() == list(properties)
+    assert list(iter(properties)) == list(properties)
+
+
+def test_object_properties_iteration_uses_a_snapshot() -> None:
+    """列挙の途中で追加しても列挙中の列が変わらないことを確認する。"""
+    properties = ObjectProperties()
+    properties.add(PROP_PRIOR_GROUP_ID_GAP, 2)
+    iterator = iter(properties)
+
+    properties.add(0x0D, b"\x01\x02")
+
+    assert next(iterator) == (PROP_PRIOR_GROUP_ID_GAP, 2)
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+def test_object_properties_find_varint_returns_none_for_a_byte_value() -> None:
+    """バイト列型の型番号を `find_varint` が引けないことを確認する。"""
+    properties = ObjectProperties()
+    properties.add(0x0D, b"\x01\x02")
+
+    assert properties.find_varint(0x0D) is None
+    assert properties.find_varint(PROP_PRIOR_GROUP_ID_GAP) is None
+
+
+def test_track_properties_find_varint_reads_immutable_properties() -> None:
+    """`find_varint` が IMMUTABLE_PROPERTIES の内側の値を引くことを確認する。
+
+    draft-ietf-moq-transport-21 §10.7 (Immutable Properties) の「MUST search both」
+    に従い、外側の値が優先される。
+    """
+    # 内側には 0x04 (偶数型) だけを置く
+    inner = encode_varint(moqt.PROP_MAX_CACHE_DURATION) + encode_varint(9)
+    properties = TrackProperties()
+    properties.add(moqt.PROP_IMMUTABLE_PROPERTIES, inner)
+
+    assert properties.find_varint(moqt.PROP_MAX_CACHE_DURATION) == 9
+
+    # 外側に同じ型番号があれば外側の値が優先される
+    properties.add(moqt.PROP_MAX_CACHE_DURATION, 3)
+
+    assert properties.find_varint(moqt.PROP_MAX_CACHE_DURATION) == 3
+    assert properties.find_varint(moqt.PROP_DYNAMIC_GROUPS) is None
+
+
 def test_goaway() -> None:
     """GOAWAY の送受信を確認する。"""
     client, server = _setup()

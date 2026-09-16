@@ -495,6 +495,7 @@ class ObjectProperties:
         この形を受け取る。
         """
     def __eq__(self, other: object, /) -> bool: ...
+    def __iter__(self, /) -> ObjectPropertiesIterator: ...
     def __len__(self, /) -> int: ...
     def __new__(cls, /) -> ObjectProperties:
         """
@@ -523,6 +524,14 @@ class ObjectProperties:
         
         空の集合は Properties Length = 0 の 1 バイトになる。
         """
+    def find_varint(self, /, prop_type: int) -> int |None:
+        """
+        任意の型番号の varint 値を引く。
+        
+        見つからない場合と、その型番号の値がバイト列である場合は `None` になる。
+        draft-ietf-moq-transport-21 §10.7 (Immutable Properties) の「MUST search both」
+        に従い IMMUTABLE_PROPERTIES の内側も探索し、外側の値を優先する。
+        """
     @property
     def immutable_properties(self, /) -> bytes |None:
         """
@@ -530,6 +539,13 @@ class ObjectProperties:
         
         内容は解釈せず生バイト列として返す。
         (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))
+        """
+    def items(self, /) -> list:
+        """
+        プロパティを保持している順に `(型番号, 値)` として列挙する。
+        
+        ワイヤ上の型番号の昇順ではなく、`add()` で追加した順に返す。
+        `list(properties)` も同じ列を返す。
         """
     @property
     def object_delivery_timeout(self, /) -> int |None:
@@ -565,6 +581,17 @@ class ObjectProperties:
         
         未知の型番号も含めてすべて返す。
         """
+
+@final
+class ObjectPropertiesIterator:
+    """
+    Object Properties の `(型番号, 値)` を追加順に列挙するイテレータ。
+    
+    列挙の途中で元の集合を `add()` で変更しても、列挙中の列は変わらない。
+    """
+    def __iter__(self, /) -> ObjectPropertiesIterator: ...
+    def __next__(self, /) -> Any |None: ...
+    def __repr__(self, /) -> str: ...
 
 @final
 class Session:
@@ -875,6 +902,7 @@ class TrackProperties:
     (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)。
     """
     def __eq__(self, other: object, /) -> bool: ...
+    def __iter__(self, /) -> TrackPropertiesIterator: ...
     def __len__(self, /) -> int: ...
     def __new__(cls, /) -> TrackProperties:
         """
@@ -886,6 +914,14 @@ class TrackProperties:
         プロパティを 1 件追加する。
         
         偶数型は varint として `int` を、奇数型は長さ付きバイト列として `bytes` を渡す。
+        """
+    @staticmethod
+    def decode(data: bytes) -> TrackProperties:
+        """
+        バッファ全体を Track Properties としてデコードする。
+        
+        長さプレフィックスが無いためバッファ末尾まで読む。空のバッファは空の集合になる。
+        型番号の重複など draft の MUST に違反する入力は `ValueError` になる。
         """
     @property
     def default_publisher_group_order(self, /) -> int |None:
@@ -910,6 +946,23 @@ class TrackProperties:
         
         (draft-ietf-moq-transport-21 §10.6 (Dynamic Groups))
         """
+    def encode(self, /) -> bytes:
+        """
+        プロパティ列をエンコードする。
+        
+        Object Properties と異なり長さプレフィックスを付けない。カウントプレフィックスを
+        持たない KVP 列そのものになり、空の集合は 0 バイトになる
+        (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+        subscription を送る引数へ埋め込むバイト列がこれである。
+        """
+    def find_varint(self, /, prop_type: int) -> int |None:
+        """
+        任意の型番号の varint 値を引く。
+        
+        見つからない場合と、その型番号の値がバイト列である場合は `None` になる。
+        IMMUTABLE_PROPERTIES の内側も探索し、外側の値を優先する
+        (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))。
+        """
     @property
     def has_unknown_mandatory(self, /) -> bool:
         """
@@ -918,6 +971,13 @@ class TrackProperties:
         必須の範囲は `MANDATORY_TRACK_PROPERTY_MIN` から `MANDATORY_TRACK_PROPERTY_MAX`
         である (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)。未知の必須
         プロパティを含む Track は扱えないため、アプリは購読を拒否できる。
+        """
+    def items(self, /) -> list:
+        """
+        プロパティを保持している順に `(型番号, 値)` として列挙する。
+        
+        ワイヤ上の型番号の昇順ではなく、`add()` で追加した順に返す。
+        `list(properties)` も同じ列を返す。
         """
     @property
     def object_delivery_timeout(self, /) -> int |None:
@@ -936,6 +996,17 @@ class TrackProperties:
         辞書は Session の `send_*` に渡す `track_properties` 引数と同じ形である。
         未知の型番号も含めてすべて返す。
         """
+
+@final
+class TrackPropertiesIterator:
+    """
+    Track Properties の `(型番号, 値)` を追加順に列挙するイテレータ。
+    
+    列挙の途中で元の集合を `add()` で変更しても、列挙中の列は変わらない。
+    """
+    def __iter__(self, /) -> TrackPropertiesIterator: ...
+    def __next__(self, /) -> Any |None: ...
+    def __repr__(self, /) -> str: ...
 
 @final
 class Uri:

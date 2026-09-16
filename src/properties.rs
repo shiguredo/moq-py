@@ -11,7 +11,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use shiguredo_moqt::object_properties::{
     ObjectProperties as MoqtObjectProperties, ObjectProperty, ObjectPropertyValue,
@@ -41,6 +41,156 @@ fn property_value(prop_type: u64, value: &Bound<'_, PyAny>) -> PyResult<ObjectPr
         "property {prop_type:#x} requires an int or bytes value, got {}",
         value.get_type().name()?
     )))
+}
+
+/// Key-Value-Pair の値を Python のオブジェクトへ変換する。
+///
+/// 偶数型は `int`、奇数型は `bytes` になる。Object / Track の両方の列挙で同じ表現を
+/// 使うため、値の変換をここへ集約する。
+fn property_python_value(py: Python<'_>, value: &impl PropertyValue) -> PyResult<Py<PyAny>> {
+    if let Some(number) = value.as_varint() {
+        return Ok(number.into_pyobject(py)?.into_any().unbind());
+    }
+    let Some(bytes) = value.as_bytes() else {
+        // 値は varint かバイト列のどちらかである
+        return Err(PyValueError::new_err(
+            "property value is neither a varint nor bytes",
+        ));
+    };
+    Ok(PyBytes::new(py, bytes).into_any().unbind())
+}
+
+/// `(型番号, 値)` の組を Python のタプルとして組み立てる。
+fn property_pair(
+    py: Python<'_>,
+    prop_type: u64,
+    value: &impl PropertyValue,
+) -> PyResult<Py<PyAny>> {
+    let converted = property_python_value(py, value)?;
+    let prop_type = prop_type.into_pyobject(py)?.into_any().unbind();
+    Ok(PyTuple::new(py, [prop_type, converted])?
+        .into_any()
+        .unbind())
+}
+
+/// Key-Value-Pair の値の読み出し方を Object Properties と Track Properties で共有する。
+///
+/// 両者は値の型が別々の enum で表現されているが、Python へは同じ
+/// `int` / `bytes` として渡すため、読み出しだけをこの trait で抽象化する。
+trait PropertyValue {
+    /// varint 値を返す。バイト列の場合は `None` になる。
+    fn as_varint(&self) -> Option<u64>;
+
+    /// バイト列を返す。varint の場合は `None` になる。
+    fn as_bytes(&self) -> Option<&[u8]>;
+}
+
+impl PropertyValue for ObjectPropertyValue {
+    fn as_varint(&self) -> Option<u64> {
+        match self {
+            Self::VarInt(number) => Some(*number),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::VarInt(_) => None,
+            Self::Bytes(bytes) => Some(bytes),
+        }
+    }
+}
+
+impl PropertyValue for TrackPropertyValue {
+    fn as_varint(&self) -> Option<u64> {
+        match self {
+            Self::VarInt(number) => Some(*number),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::VarInt(_) => None,
+            Self::Bytes(bytes) => Some(bytes),
+        }
+    }
+}
+
+/// Object Properties の `(型番号, 値)` を追加順に列挙するイテレータ。
+///
+/// 列挙の途中で元の集合を `add()` で変更しても、列挙中の列は変わらない。
+#[pyclass(name = "ObjectPropertiesIterator")]
+pub(crate) struct ObjectPropertiesIterator {
+    /// 列挙対象のスナップショット。
+    items: Vec<ObjectProperty>,
+    /// 次に返す位置。
+    index: usize,
+}
+
+#[pymethods]
+impl ObjectPropertiesIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(property) = self.items.get(self.index) else {
+            return Ok(None);
+        };
+        self.index += 1;
+        Ok(Some(property_pair(
+            py,
+            property.prop_type,
+            &property.value,
+        )?))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ObjectPropertiesIterator(index={}, len={})",
+            self.index,
+            self.items.len()
+        )
+    }
+}
+
+/// Track Properties の `(型番号, 値)` を追加順に列挙するイテレータ。
+///
+/// 列挙の途中で元の集合を `add()` で変更しても、列挙中の列は変わらない。
+#[pyclass(name = "TrackPropertiesIterator")]
+pub(crate) struct TrackPropertiesIterator {
+    /// 列挙対象のスナップショット。
+    items: Vec<TrackProperty>,
+    /// 次に返す位置。
+    index: usize,
+}
+
+#[pymethods]
+impl TrackPropertiesIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(property) = self.items.get(self.index) else {
+            return Ok(None);
+        };
+        self.index += 1;
+        Ok(Some(property_pair(
+            py,
+            property.prop_type,
+            &property.value,
+        )?))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TrackPropertiesIterator(index={}, len={})",
+            self.index,
+            self.items.len()
+        )
+    }
 }
 
 /// MOQT の Object Properties。
@@ -79,7 +229,8 @@ impl ObjectProperties {
     /// プロパティブロック全体をエンコードする。
     ///
     /// 空の集合は Properties Length = 0 の 1 バイトになる。
-    fn encode<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    #[pyo3(name = "encode")]
+    fn encode_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let mut buf = Vec::new();
         self.inner.encode(&mut buf).map_err(codec_error)?;
         Ok(PyBytes::new(py, &buf))
@@ -94,6 +245,7 @@ impl ObjectProperties {
         let (inner, consumed) = MoqtObjectProperties::decode(data).map_err(codec_error)?;
         Ok((Self { inner }, consumed))
     }
+
     /// プロパティを `{prop_type: 値}` の辞書へ変換する。
     ///
     /// 未知の型番号も含めてすべて返す。
@@ -110,6 +262,34 @@ impl ObjectProperties {
             }
         }
         Ok(dict.unbind())
+    }
+
+    /// プロパティを保持している順に `(型番号, 値)` として列挙する。
+    ///
+    /// ワイヤ上の型番号の昇順ではなく、`add()` で追加した順に返す。
+    /// `list(properties)` も同じ列を返す。
+    fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let items = PyList::empty(py);
+        for property in self.inner.iter() {
+            items.append(property_pair(py, property.prop_type, &property.value)?)?;
+        }
+        Ok(items)
+    }
+
+    /// 任意の型番号の varint 値を引く。
+    ///
+    /// 見つからない場合と、その型番号の値がバイト列である場合は `None` になる。
+    /// draft-ietf-moq-transport-21 §10.7 (Immutable Properties) の「MUST search both」
+    /// に従い IMMUTABLE_PROPERTIES の内側も探索し、外側の値を優先する。
+    fn find_varint(&self, prop_type: u64) -> Option<u64> {
+        self.inner.find_varint(prop_type)
+    }
+
+    fn __iter__(&self) -> ObjectPropertiesIterator {
+        ObjectPropertiesIterator {
+            items: self.inner.as_slice().to_vec(),
+            index: 0,
+        }
     }
 
     /// PRIOR_GROUP_ID_GAP (0x3C): 直前の存在しない Group の個数。
@@ -150,7 +330,8 @@ impl ObjectProperties {
     /// (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))
     #[getter]
     fn immutable_properties<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
-        self.find_bytes(PROP_IMMUTABLE_PROPERTIES)
+        self.inner
+            .find_bytes(PROP_IMMUTABLE_PROPERTIES)
             .map(|value| PyBytes::new(py, value))
     }
 
@@ -163,7 +344,7 @@ impl ObjectProperties {
     /// `moqt.moq.Publication.send_object` と `send_datagram` の `properties_data` は
     /// この形を受け取る。
     fn __bytes__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        self.encode(py)
+        self.encode_properties(py)
     }
 
     fn __repr__(&self) -> String {
@@ -183,23 +364,18 @@ impl ObjectProperties {
     }
 }
 
-impl ObjectProperties {
-    /// varint 型のプロパティを引く。
-    fn find_varint(&self, prop_type: u64) -> Option<u64> {
-        self.inner.iter().find_map(|property| {
-            if property.prop_type != prop_type {
-                return None;
-            }
-            match property.value {
-                ObjectPropertyValue::VarInt(value) => Some(value),
-                ObjectPropertyValue::Bytes(_) => None,
-            }
-        })
-    }
-
+/// Object Properties の内部参照を Rust 側だけで共有する。
+///
+/// `#[pymethods]` に置いたメソッドは Python の公開 API になり型スタブにも現れる。
+/// Python から使わせる必要の無い参照はこの trait 側に置く。
+trait ObjectPropertiesExt {
     /// バイト列型のプロパティを引く。
+    fn find_bytes(&self, prop_type: u64) -> Option<&[u8]>;
+}
+
+impl ObjectPropertiesExt for MoqtObjectProperties {
     fn find_bytes(&self, prop_type: u64) -> Option<&[u8]> {
-        self.inner.iter().find_map(|property| {
+        self.iter().find_map(|property| {
             if property.prop_type != prop_type {
                 return None;
             }
@@ -249,6 +425,28 @@ impl TrackProperties {
         Ok(())
     }
 
+    /// プロパティ列をエンコードする。
+    ///
+    /// Object Properties と異なり長さプレフィックスを付けない。カウントプレフィックスを
+    /// 持たない KVP 列そのものになり、空の集合は 0 バイトになる
+    /// (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    /// subscription を送る引数へ埋め込むバイト列がこれである。
+    fn encode<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let mut buf = Vec::new();
+        self.inner.encode(&mut buf).map_err(codec_error)?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// バッファ全体を Track Properties としてデコードする。
+    ///
+    /// 長さプレフィックスが無いためバッファ末尾まで読む。空のバッファは空の集合になる。
+    /// 型番号の重複など draft の MUST に違反する入力は `ValueError` になる。
+    #[staticmethod]
+    fn decode(data: &[u8]) -> PyResult<Self> {
+        let inner = MoqtTrackProperties::decode(data).map_err(codec_error)?;
+        Ok(Self { inner })
+    }
+
     /// プロパティを `{prop_type: 値}` の辞書へ変換する。
     ///
     /// 辞書は Session の `send_*` に渡す `track_properties` 引数と同じ形である。
@@ -266,6 +464,31 @@ impl TrackProperties {
             }
         }
         Ok(dict.unbind())
+    }
+
+    /// プロパティを保持している順に `(型番号, 値)` として列挙する。
+    ///
+    /// ワイヤ上の型番号の昇順ではなく、`add()` で追加した順に返す。
+    /// `list(properties)` も同じ列を返す。
+    fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let items = PyList::empty(py);
+        for property in self.inner.as_slice() {
+            let value = match &property.value {
+                TrackPropertyValue::VarInt(number) => ObjectPropertyValue::VarInt(*number),
+                TrackPropertyValue::Bytes(bytes) => ObjectPropertyValue::Bytes(bytes.clone()),
+            };
+            items.append(property_pair(py, property.prop_type, &value)?)?;
+        }
+        Ok(items)
+    }
+
+    /// 任意の型番号の varint 値を引く。
+    ///
+    /// 見つからない場合と、その型番号の値がバイト列である場合は `None` になる。
+    /// IMMUTABLE_PROPERTIES の内側も探索し、外側の値を優先する
+    /// (draft-ietf-moq-transport-21 §10.7 (Immutable Properties))。
+    fn find_varint(&self, prop_type: u64) -> Option<u64> {
+        self.inner.find_varint(prop_type)
     }
 
     /// DYNAMIC_GROUPS (0x30): Group が動的に決まるか。
@@ -318,6 +541,13 @@ impl TrackProperties {
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    fn __iter__(&self) -> TrackPropertiesIterator {
+        TrackPropertiesIterator {
+            items: self.inner.as_slice().to_vec(),
+            index: 0,
+        }
     }
 
     fn __repr__(&self) -> String {
