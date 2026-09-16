@@ -421,6 +421,44 @@ def test_builders_repr_omit_rust_option_notation() -> None:
         assert "Some(" not in repr(builder)
 
 
+def test_builders_repr_use_python_bool_notation() -> None:
+    """
+    構築 API の repr が Rust の bool 表記を含まないことを確認する。
+
+    repr は対話環境やログ、テストの失敗メッセージに出る。bool の値は Python と
+    同じ `True` / `False` と表示される
+    (draft-ietf-moq-msf-01 §5.1.3 (Is Complete) / §5.2.7 (Is Live))。
+    """
+    # bool を持つ API は、どちらの値でも Python と同じ True / False と表示される
+    assert repr(Track("video", "loc", True)) == "Track(name=video, packaging=loc, is_live=True)"
+    assert repr(Track("video", "loc", False)) == "Track(name=video, packaging=loc, is_live=False)"
+
+    catalog = Catalog()
+    assert repr(catalog) == f"Catalog(version={SUPPORTED_VERSION}, tracks=0, is_complete=False)"
+
+    # is_complete を真にした場合も Python の True と表示される
+    catalog.is_complete = True
+    assert repr(catalog) == f"Catalog(version={SUPPORTED_VERSION}, tracks=0, is_complete=True)"
+
+    # bool を持たない API の repr にも Rust の bool 表記が現れない
+    builders = [
+        CloneTrack("clone", "video"),
+        RemoveTrack("video", "ns"),
+        InitData("init", "AA=="),
+        Buffers(100, 50, 200),
+        Template(1000, 33, 1, 0, 1, 2, 5000, 33),
+        AuthInfo("bearer", b"{}"),
+        Accessibility("urn:example:scheme", "value"),
+        DeltaUpdate(),
+        MediaTimeline(),
+        EventTimeline(),
+        Uri.parse("moqt://example.com/live#msf:room-1--video"),
+    ]
+    for builder in builders:
+        assert "true" not in repr(builder)
+        assert "false" not in repr(builder)
+
+
 def test_catalog_rejects_an_unknown_packaging() -> None:
     """
     draft が定めない packaging を持つトラックの追加を拒否することを確認する。

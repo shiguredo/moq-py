@@ -74,6 +74,19 @@ fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
     }
 }
 
+/// `bool` を Python の値と同じ表記で書き出す。
+///
+/// `repr` は対話環境やログ、テストの失敗メッセージに出る。Rust の `true` / `false`
+/// ではなく Python の `True` / `False` と同じ表記にして、利用者が Python の値として
+/// 読めるようにする。
+fn format_bool(value: bool) -> String {
+    if value {
+        "True".to_string()
+    } else {
+        "False".to_string()
+    }
+}
+
 /// MSF カタログ。
 ///
 /// draft-ietf-moq-msf-01 §5 (Catalog) の完全カタログである。delta 更新は
@@ -257,7 +270,7 @@ impl Catalog {
             "Catalog(version={}, tracks={}, is_complete={})",
             self.inner.version,
             self.inner.tracks.len(),
-            self.inner.is_complete
+            format_bool(self.inner.is_complete)
         )
     }
 
@@ -1004,7 +1017,9 @@ impl Track {
     fn __repr__(&self) -> String {
         format!(
             "Track(name={}, packaging={}, is_live={})",
-            self.name, self.packaging, self.is_live
+            self.name,
+            self.packaging,
+            format_bool(self.is_live)
         )
     }
 
