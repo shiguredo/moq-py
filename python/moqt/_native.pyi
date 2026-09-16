@@ -1147,6 +1147,24 @@ def encode_varint(value: int) -> bytes:
     最小バイト数の表現を返す。
     """
 
+def generate(source: Any |None = None) -> int:
+    """
+    GREASE 値を生成する。
+    
+    `source` は `stop` を 1 つだけ受け取り、`[0, stop)` の整数を返す呼び出し可能
+    オブジェクトである (`random.Random.randrange` と同じ形)。省略した場合は
+    標準ライブラリの `random.randrange` を使う。テストから決定的な値を渡せるように
+    引数で受け取る。
+    """
+
+def is_grease(value: int) -> bool:
+    """
+    与えられた値が GREASE 値かどうかを返す。
+    
+    上限 `GREASE_MAX` を超えた値も、値の並びに合致すれば `True` になる。受信側は
+    将来 draft の上限が広がった場合にも未知値として無視できる必要があるためである。
+    """
+
 def is_padding_datagram(data: bytes) -> bool:
     """
     データグラムの種別がパディングかを判定する。

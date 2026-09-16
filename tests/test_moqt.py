@@ -1,7 +1,7 @@
 """`moqt.moqt` の codec と sans I/O セッション状態機械のテスト。"""
 
 import pytest
-from moqt import moqt
+from moqt import _native, moqt
 from moqt.moqt import (
     MANDATORY_TRACK_PROPERTY_MIN,
     PADDING_DATAGRAM_TYPE,
@@ -1032,3 +1032,157 @@ def test_subscription_cleanup_ready_is_false_while_established() -> None:
 
     assert client.subscription_cleanup_ready(request_id) is False
     assert client.subscription_cleanup_ready(9999) is None
+
+
+# ─── GREASE ─────────────────────────────────────────────────
+
+
+def test_grease_constants_are_drafted_values() -> None:
+    """GREASE の定数が draft の値と一致することを確認する。
+
+    (draft-ietf-moq-transport-21 §13 (Grease))
+    """
+    assert moqt.GREASE_BASE == 0x9D
+    assert moqt.GREASE_INTERVAL == 0x7F
+    assert moqt.GREASE_MAX == 0x3FFF_FFFF_FFFF_FFDE
+
+
+def test_grease_generate_uses_the_drafted_formula() -> None:
+    """`generate` が乱数源から `0x7F * N + 0x9D` を作ることを確認する。
+
+    乱数源は `stop` を受け取る呼び出し可能オブジェクトである。渡した N が
+    そのまま使われることを、決定的な乱数源で確認する。
+    """
+    assert moqt.generate(lambda _stop: 0) == moqt.GREASE_BASE
+    assert moqt.generate(lambda _stop: 1) == moqt.GREASE_INTERVAL + moqt.GREASE_BASE
+    assert moqt.generate(lambda _stop: 42) == moqt.GREASE_INTERVAL * 42 + moqt.GREASE_BASE
+
+
+def test_grease_generate_requests_the_whole_representable_range() -> None:
+    """`generate` が乱数源へ渡す上限を確認する。
+
+    `GREASE_MAX` を超えない最大の N は `(GREASE_MAX - GREASE_BASE) // GREASE_INTERVAL`
+    である。`stop` は開区間の上限なので 1 を足した値が渡る。
+    """
+    drawn: list[int] = []
+
+    def source(stop: int) -> int:
+        # 乱数源が受け取った上限を記録してから 0 を返す
+        drawn.append(stop)
+        return 0
+
+    moqt.generate(source)
+
+    assert drawn == [(moqt.GREASE_MAX - moqt.GREASE_BASE) // moqt.GREASE_INTERVAL + 1]
+
+
+def test_grease_generate_uses_the_largest_sequence() -> None:
+    """乱数源が上限いっぱいの N を返したときに `GREASE_MAX` ちょうどが生成されることを確認する。
+
+    `GREASE_MAX` 自身が値の並びに乗るため、これが生成できる最大の GREASE 値になる。
+    """
+    upper = (moqt.GREASE_MAX - moqt.GREASE_BASE) // moqt.GREASE_INTERVAL
+    value = moqt.generate(lambda stop: stop - 1)
+
+    assert value == moqt.GREASE_INTERVAL * upper + moqt.GREASE_BASE
+    assert value == moqt.GREASE_MAX
+    assert moqt.is_grease(value) is True
+
+
+def test_grease_is_grease_accepts_generated_values() -> None:
+    """`is_grease` が `generate` の作った値を GREASE と判定することを確認する。"""
+    # N を順に変えて、いずれも GREASE と判定されることを確認する
+    for n in [0, 1, 2, 41, 100, (moqt.GREASE_MAX - moqt.GREASE_BASE) // moqt.GREASE_INTERVAL]:
+        assert moqt.is_grease(moqt.generate(lambda _stop, n=n: n)) is True
+
+
+def test_grease_is_grease_accepts_a_pattern_match_above_the_upper_bound() -> None:
+    """上限を超えても値の並びに合致すれば GREASE と判定されることを確認する。
+
+    受信側は将来 draft の上限が広がった場合にも未知値として無視できる必要がある。
+    """
+    assert moqt.is_grease(moqt.GREASE_MAX + moqt.GREASE_INTERVAL) is True
+
+
+def test_grease_is_grease_rejects_values_outside_the_pattern() -> None:
+    """値の並びから外れた値を GREASE と判定しないことを確認する。"""
+    # 基数より小さい値は GREASE になり得ない
+    assert moqt.is_grease(0) is False
+    assert moqt.is_grease(moqt.GREASE_BASE - 1) is False
+    # 間隔から 1 だけずれた値も GREASE ではない
+    assert moqt.is_grease(moqt.GREASE_BASE + 1) is False
+    assert moqt.is_grease(moqt.GREASE_BASE + moqt.GREASE_INTERVAL - 1) is False
+    assert moqt.is_grease(moqt.GREASE_MAX - 1) is False
+
+
+def test_grease_generate_rejects_an_out_of_range_sequence() -> None:
+    """範囲外の N を返す乱数源を `generate` が拒否することを確認する。
+
+    乱数源の契約は `[0, stop)` の整数を返すことである。契約を破る値を黙って
+    丸めずエラーにする。
+    """
+    with pytest.raises(ValueError, match="exceeds"):
+        moqt.generate(lambda stop: stop)
+
+
+def test_grease_generate_rejects_a_non_integer_sequence() -> None:
+    """整数として読めない値を返す乱数源を `generate` が拒否することを確認する。
+
+    `moqt.moqt.generate` の型は `(int) -> int` の呼び出し可能オブジェクトを要求するため、
+    契約違反の乱数源は拡張モジュールの関数へ直接渡して検査する。
+    """
+    with pytest.raises(ValueError, match="must return an int"):
+        _native.generate(lambda _stop: "0")
+
+
+def test_grease_generate_uses_the_standard_random_by_default() -> None:
+    """乱数源を省略した場合は標準ライブラリの乱数で生成することを確認する。"""
+    values = {moqt.generate() for _ in range(8)}
+
+    assert all(moqt.is_grease(value) for value in values)
+    assert all(value <= moqt.GREASE_MAX for value in values)
+    # 毎回同じ値では乱数源として機能していない
+    assert len(values) > 1
+
+
+# ─── セッションの既定値 ─────────────────────────────────────
+
+
+def test_session_defaults_are_exported() -> None:
+    """セッションの既定値が `moqt.moqt` から参照できることを確認する。
+
+    (draft-ietf-moq-transport-21 §10.5 (DEFAULT PUBLISHER GROUP ORDER) /
+     §3.1.2 (Track Alias) / §9.2 (GOAWAY) / §9.9 (PUBLISH_DONE))
+    """
+    assert moqt.DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING == 0x1
+    assert moqt.MAX_NEW_SESSION_URI_LENGTH == 8192
+    assert moqt.MAX_OUT_OF_ORDER_REQUEST_IDS == 1024
+    assert moqt.DEFAULT_PEER_ALIAS_RETENTION_MS > 0
+    assert moqt.PUBLISH_DONE_STREAM_COUNT_UNKNOWN == 0xFFFF_FFFF_FFFF_FFFF
+
+
+def test_goaway_accepts_a_new_session_uri_at_the_length_limit() -> None:
+    """`MAX_NEW_SESSION_URI_LENGTH` ちょうどの URI を GOAWAY が受け付けることを確認する。
+
+    (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
+    """
+    client, server = _setup()
+    uri = b"a" * moqt.MAX_NEW_SESSION_URI_LENGTH
+
+    events = server.send_goaway(uri, 5000)
+
+    assert [event.kind for event in events] == ["send_control"]
+    kinds = [event.kind for event in client.receive_control(_event_data(events[0]))]
+    assert "goaway" in kinds
+
+
+def test_goaway_rejects_a_new_session_uri_beyond_the_length_limit() -> None:
+    """`MAX_NEW_SESSION_URI_LENGTH` を超える URI を GOAWAY が拒否することを確認する。
+
+    (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
+    """
+    _client, server = _setup()
+    uri = b"a" * (moqt.MAX_NEW_SESSION_URI_LENGTH + 1)
+
+    with pytest.raises(RuntimeError, match="new_session_uri exceeds"):
+        server.send_goaway(uri, 5000)

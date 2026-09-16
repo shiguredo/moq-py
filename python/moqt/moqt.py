@@ -11,6 +11,8 @@ WebTransport を介した client / server は `moqt.moq` が提供する。
 MoQT は draft 由来であり、将来の改訂で変更される可能性がある。
 """
 
+from collections.abc import Callable
+
 from moqt import _native
 from moqt._native import (
     Event,
@@ -186,6 +188,41 @@ MAX_DATAGRAM_SIZE: int = 1100
 # (draft-ietf-moq-transport-21 §9.20.5 (PUBLISHER_PRIORITY Parameter))
 PUBLISHER_PRIORITY_DEFAULT: int = _native.PUBLISHER_PRIORITY_DEFAULT
 
+# DEFAULT_PUBLISHER_GROUP_ORDER の既定値
+# (draft-ietf-moq-transport-21 §10.5 (DEFAULT PUBLISHER GROUP ORDER))
+DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING: int = _native.DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING
+"""Ascending。宣言が省略されたときの publisher の選好。"""
+
+# キャンセル済み peer publisher alias の tombstone 保持期間の既定値 (ms)
+# (draft-ietf-moq-transport-21 §3.1.2 (Track Alias))
+DEFAULT_PEER_ALIAS_RETENTION_MS: int = _native.DEFAULT_PEER_ALIAS_RETENTION_MS
+"""遅延 Object を捨てられる程度に短く、通常の再確立を妨げない値。"""
+
+# GOAWAY の New Session URI の最大長
+# (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
+MAX_NEW_SESSION_URI_LENGTH: int = _native.MAX_NEW_SESSION_URI_LENGTH
+"""セッション移行先を示す URI の最大長 (バイト)。"""
+
+# PUBLISH_DONE の STREAM_COUNT が不明であることを示す番兵
+# (draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE))
+PUBLISH_DONE_STREAM_COUNT_UNKNOWN: int = _native.PUBLISH_DONE_STREAM_COUNT_UNKNOWN
+"""publisher が stream 数を表明しない場合の値。"""
+
+# 受信済み request id の穴として保持できる件数の上限
+MAX_OUT_OF_ORDER_REQUEST_IDS: int = _native.MAX_OUT_OF_ORDER_REQUEST_IDS
+"""追い越して届いた request id を保持できる件数。超過は INVALID_REQUEST_ID になる。"""
+
+# GREASE (Generate Random Extensions And Sustain Extensibility)
+# (draft-ietf-moq-transport-21 §13 (Grease))
+GREASE_BASE: int = _native.GREASE_BASE
+"""GREASE 値の基数 (0x9D)。"""
+
+GREASE_INTERVAL: int = _native.GREASE_INTERVAL
+"""GREASE 値の間隔 (0x7F)。"""
+
+GREASE_MAX: int = _native.GREASE_MAX
+"""GREASE 値の上限 (0x3FFFFFFFFFFFFFDE)。"""
+
 # Object Properties の型番号
 # (draft-ietf-moq-transport-21 §16.8 (Properties) Table 14)
 PROP_PRIOR_GROUP_ID_GAP: int = _native.PROP_PRIOR_GROUP_ID_GAP
@@ -223,12 +260,42 @@ MANDATORY_TRACK_PROPERTY_MIN: int = _native.MANDATORY_TRACK_PROPERTY_MIN
 MANDATORY_TRACK_PROPERTY_MAX: int = _native.MANDATORY_TRACK_PROPERTY_MAX
 """必須の Track Property の型番号の上限 (§3.6)。"""
 
+
+def generate(source: Callable[[int], int] | None = None) -> int:
+    """GREASE 値を 1 つ生成する。
+
+    `source` は `stop` を 1 つ受け取り `[0, stop)` の整数を返す呼び出し可能
+    オブジェクトである。省略すると標準ライブラリの `random.randrange` を使う。
+    乱数源を渡せるため、テストでは決定的な値を再現できる。
+
+    (draft-ietf-moq-transport-21 §13 (Grease))
+    """
+    return _native.generate(source)
+
+
+def is_grease(value: int) -> bool:
+    """値が GREASE 値かどうかを返す。
+
+    上限 `GREASE_MAX` を超えた値も値の並びに合致すれば `True` になる。
+
+    (draft-ietf-moq-transport-21 §13 (Grease))
+    """
+    return _native.is_grease(value)
+
+
 __all__ = [
+    "DEFAULT_PEER_ALIAS_RETENTION_MS",
+    "DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING",
     "DEFAULT_SUBSCRIBER_PRIORITY",
     "FETCH_HEADER_TYPE",
+    "GREASE_BASE",
+    "GREASE_INTERVAL",
+    "GREASE_MAX",
     "MANDATORY_TRACK_PROPERTY_MAX",
     "MANDATORY_TRACK_PROPERTY_MIN",
     "MAX_DATAGRAM_SIZE",
+    "MAX_NEW_SESSION_URI_LENGTH",
+    "MAX_OUT_OF_ORDER_REQUEST_IDS",
     "OBJECT_STATUS_END_OF_GROUP",
     "OBJECT_STATUS_END_OF_TRACK",
     "OBJECT_STATUS_NORMAL",
@@ -268,6 +335,7 @@ __all__ = [
     "PUBLISH_DONE_GOING_AWAY",
     "PUBLISH_DONE_INTERNAL_ERROR",
     "PUBLISH_DONE_MALFORMED_TRACK",
+    "PUBLISH_DONE_STREAM_COUNT_UNKNOWN",
     "PUBLISH_DONE_TOO_FAR_BEHIND",
     "PUBLISH_DONE_TRACK_ENDED",
     "PUBLISH_DONE_UNAUTHORIZED",
@@ -341,6 +409,8 @@ __all__ = [
     "decode_varint",
     "decode_varint_prefix",
     "encode_varint",
+    "generate",
+    "is_grease",
     "is_padding_datagram",
     "setup_stream_type",
 ]

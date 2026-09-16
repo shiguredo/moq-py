@@ -1,8 +1,12 @@
 """`moqt.moqt` の sans I/O セッション状態機械に対する Property-Based Testing。"""
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from moqt.moqt import (
+    GREASE_BASE,
+    GREASE_INTERVAL,
+    GREASE_MAX,
     MANDATORY_TRACK_PROPERTY_MAX,
     MANDATORY_TRACK_PROPERTY_MIN,
     PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
@@ -15,6 +19,8 @@ from moqt.moqt import (
     TrackProperties,
     decode_message,
     encode_varint,
+    generate,
+    is_grease,
 )
 
 # Object Status の Normal (draft-ietf-moq-transport-21 §11.1.2 (Object Status))。
@@ -435,3 +441,53 @@ def prop_track_properties_encode_matches_session_output(
     for prop_type, value in message.body["track_properties"].items():
         received.add(prop_type, value)
     assert received.encode() == encoded
+
+
+# GREASE 値の連番 (`0x7F * N + 0x9D` の N) として取り得る最大値。
+#
+# `GREASE_MAX` ちょうどが値の並びに乗るため、この値が最大の N になる。
+MAX_GREASE_SEQUENCE = (GREASE_MAX - GREASE_BASE) // GREASE_INTERVAL
+
+
+@given(sequence=st.integers(min_value=0, max_value=MAX_GREASE_SEQUENCE))
+def prop_grease_round_trip(sequence: int) -> None:
+    """
+    範囲内の連番から生成した GREASE 値を `is_grease` が受理することを確認する。
+
+    値の並びは `0x7F * N + 0x9D` で上限は `GREASE_MAX` である
+    (draft-ietf-moq-transport-21 §13 (Grease))。乱数源を渡して連番を固定するため、
+    生成される値も固定される。
+    """
+    # 乱数源は `stop` を受け取る呼び出し可能オブジェクトである
+    value = generate(lambda _stop: sequence)
+
+    assert value == GREASE_INTERVAL * sequence + GREASE_BASE
+    assert value <= GREASE_MAX
+    assert is_grease(value) is True
+
+
+@given(sequence=st.integers(min_value=MAX_GREASE_SEQUENCE + 1, max_value=2**64 - 1))
+def prop_grease_generate_rejects_out_of_range_sequences(sequence: int) -> None:
+    """
+    上限を超える連番を乱数源が返したときに `generate` が失敗することを確認する。
+
+    上限を超える連番からは `GREASE_MAX` を超える値しか作れないため、黙って
+    上限へ丸めずエラーにする。
+    """
+    with pytest.raises(ValueError, match="exceeds"):
+        generate(lambda _stop: sequence)
+
+
+@given(
+    value=st.integers(min_value=0, max_value=2**64 - 1).filter(
+        lambda value: value % GREASE_INTERVAL != GREASE_BASE % GREASE_INTERVAL
+    )
+)
+def prop_grease_is_grease_rejects_other_values(value: int) -> None:
+    """
+    値の並びに合致しない値を `is_grease` が拒否することを確認する。
+
+    `(value - GREASE_BASE)` が `GREASE_INTERVAL` で割り切れない値、または
+    `GREASE_BASE` より小さい値は GREASE ではない。
+    """
+    assert is_grease(value) is False

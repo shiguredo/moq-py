@@ -15,6 +15,7 @@
 mod codec;
 mod core;
 mod errors;
+mod grease;
 mod loc;
 mod msf;
 mod properties;
@@ -63,7 +64,14 @@ mod _native {
         SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, SETUP_OPTION_MAX_FILTER_RANGES,
         SETUP_OPTION_MAX_REQUEST_UPDATES, SETUP_OPTION_MOQT_IMPLEMENTATION, SETUP_OPTION_PATH,
     };
-    use shiguredo_moqt::session::types::PUBLISHER_PRIORITY_DEFAULT;
+    use shiguredo_moqt::session::core::{
+        DEFAULT_PEER_ALIAS_RETENTION_MS, PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+    };
+    use shiguredo_moqt::session::request_id::MAX_OUT_OF_ORDER_REQUEST_IDS;
+    use shiguredo_moqt::session::types::{
+        DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, MAX_NEW_SESSION_URI_LENGTH,
+        PUBLISHER_PRIORITY_DEFAULT,
+    };
     use shiguredo_moqt::stream::{
         FETCH_HEADER_TYPE, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK,
         PADDING_DATAGRAM_TYPE, PADDING_STREAM_TYPE, SETUP_STREAM_TYPE,
@@ -77,6 +85,10 @@ mod _native {
     };
     #[pymodule_export]
     use crate::core::{CoreEvent, CoreSession};
+
+    // GREASE のヘルパー (moqt.moqt)
+    #[pymodule_export]
+    use crate::grease::{generate, is_grease};
 
     // LOC の codec (moqt.loc)
     #[pymodule_export]
@@ -259,11 +271,41 @@ mod _native {
 
         // 既定値
         module.add("PUBLISHER_PRIORITY_DEFAULT", PUBLISHER_PRIORITY_DEFAULT)?;
+        module.add(
+            "DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING",
+            DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING,
+        )?;
+        module.add(
+            "DEFAULT_PEER_ALIAS_RETENTION_MS",
+            DEFAULT_PEER_ALIAS_RETENTION_MS,
+        )?;
+
+        // GOAWAY の New Session URI の最大長 (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
+        // Rust 側はバイト列の長さなので usize である。Python の int へは u64 として渡す
+        // (既知の小さな定数なので桁落ちは起きない)
+        module.add(
+            "MAX_NEW_SESSION_URI_LENGTH",
+            MAX_NEW_SESSION_URI_LENGTH as u64,
+        )?;
+
+        // PUBLISH_DONE の STREAM_COUNT が不明であることを示す番兵
+        // (draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE))
+        module.add(
+            "PUBLISH_DONE_STREAM_COUNT_UNKNOWN",
+            PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+        )?;
+
+        // 受信済み request id の穴として保持できる件数の上限
+        module.add(
+            "MAX_OUT_OF_ORDER_REQUEST_IDS",
+            MAX_OUT_OF_ORDER_REQUEST_IDS as u64,
+        )?;
 
         // LOC と MSF の定数
         crate::loc::register_constants(module)?;
         crate::msf::register_constants(module)?;
         crate::properties::register_constants(module)?;
+        crate::grease::register_constants(module)?;
         Ok(())
     }
 }
