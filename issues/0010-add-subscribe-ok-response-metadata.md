@@ -1,7 +1,7 @@
 # SUBSCRIBE_OK と REQUEST_OK の応答メタデータを公開する
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/add-subscribe-ok-response-metadata
 - Polished:
 
@@ -35,3 +35,35 @@ server 側の `Publication` についても、REQUEST_OK を受けた時点の�
 - `Client.subscribe` が返す `Subscription` から parameters と track_properties を参照できること
 - `Client.publish` が返す `Publication` から同様に参照できること
 - e2e テストで LARGEST_OBJECT を含む応答が観測できること
+
+## 解決方法
+
+`Subscription` と `Publication` に `parameters` / `track_properties` を追加し、
+待ち合わせが返すイベントの値を保持するようにした。表現は
+`moqt.moqt.Message.parameters` / `Message.track_properties` と同じであり、
+parameters は型番号をキーにしたエンコード済みバイト列の辞書、track_properties は
+偶数型が `int`、奇数型が `bytes` の辞書である。
+
+状態機械の `RequestOkReceived` イベントは応答の Track Properties を運ばないため、
+`src/core.rs` の `CoreEvent` に `track_properties` を追加し、受信した生バイト列から
+`decode_track_properties_data` で取り出すようにした。応答メッセージを処理する
+`receive_request_stream` は、生バイト列をイベント変換へ渡す
+`drain_events_with_data` を使う。Track Properties を運ばない応答では空の辞書に
+なり、応答以外のメッセージでは `None` になる。
+
+保持する値は次のとおりである。
+
+- `Client.subscribe` が返す `Subscription` は SUBSCRIBE_OK の値を保持する
+- `Client.publish` が返す `Publication` は REQUEST_OK の値を保持する
+- `Server` の `SubscriptionRequest.subscribe_ok` と `PublisherRequest.accept` が
+  返す `Publication` は、自側が送った応答の値を保持する
+
+REQUEST_OK が Track Properties を運べるのは TRACK_STATUS への応答だけであり、
+PUBLISH への応答では空でなければならない (draft-ietf-moq-transport-21 §9.3
+(REQUEST_OK))。moqt-rs も空でない Track Properties を拒否するため、server 側の
+`Publication.track_properties` は PUBLISH の応答では空になる。
+
+テストは `tests/test_e2e.py` の `test_subscribe_ok_metadata_is_exposed` /
+`test_request_ok_metadata_is_exposed` と、`tests/test_moqt.py` の
+`test_request_ok_event_reports_the_response_metadata` /
+`test_request_ok_event_without_track_properties_reports_an_empty_dict` で確認する。
