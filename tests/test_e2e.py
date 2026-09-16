@@ -1301,3 +1301,73 @@ async def test_datagram_priority_mismatch_cancels_the_subscription(moq_pair: Moq
 
     # §12.1 が求めるのは購読の取り消しであり、セッションの終了ではない
     assert moq_pair.client.established is True
+
+
+async def test_subscribe_ok_metadata_is_exposed(moq_pair: MoqPair) -> None:
+    """
+    SUBSCRIBE_OK が運んだパラメータと Track Properties を購読から参照できることを確認する。
+
+    EXPIRES と LARGEST_OBJECT は publisher が購読条件を確定するために返す値であり、
+    subscriber がこれを読めないと購読の有効期限や配信済みの範囲を判断できない
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters) /
+    §8.4 (Track and Object Properties))。
+    """
+    # LARGEST_OBJECT と Track Properties を付けた SUBSCRIBE_OK を返す
+    largest_object = (7, 9)
+    track_properties: dict[int, object] = {moqt.PROP_DEFAULT_PUBLISHER_PRIORITY: 200}
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        await request.subscribe_ok(
+            TRACK_ALIAS,
+            parameters={moqt.PARAM_LARGEST_OBJECT: largest_object},
+            track_properties=track_properties,
+        )
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+
+    # LARGEST_OBJECT は (Group ID, Object ID) を表すエンコード済みバイト列として届く。
+    # LARGEST_OBJECT の Value は Group ID と Object ID の 2 つの vi64 である
+    # (draft-ietf-moq-transport-21 §9.20.9 (LARGEST_OBJECT Parameter))。
+    assert moqt.PARAM_LARGEST_OBJECT in subscription.parameters
+    encoded = subscription.parameters[moqt.PARAM_LARGEST_OBJECT]
+    assert isinstance(encoded, bytes)
+    group_id, consumed = moqt.decode_varint(encoded)
+    object_id = moqt.decode_varint(encoded[consumed:])[0]
+    assert (group_id, object_id) == largest_object
+
+    # Track Properties は型番号をキーにした辞書として届く
+    assert subscription.track_properties == track_properties
+
+
+async def test_request_ok_metadata_is_exposed(moq_pair: MoqPair) -> None:
+    """
+    REQUEST_OK が運んだパラメータを配信から参照できることを確認する。
+
+    PUBLISH への応答は REQUEST_OK であり、publisher が返す EXPIRES は配信の有効期限を
+    表す。配信側がこれを読めないと、いつ配信を終えるかを判断できない
+    (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK) /
+    §9.20 (Control Message Parameters))。
+    """
+    # REQUEST_OK に EXPIRES を載せて受け入れる。REQUEST_OK が Track Properties を
+    # 運べるのは TRACK_STATUS への応答だけで、PUBLISH への応答では空でなければならない
+    # (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))
+    expires_ms = 30_000
+
+    async def on_publish(request: PublisherRequest) -> None:
+        await request.accept(parameters={moqt.PARAM_EXPIRES: expires_ms})
+
+    moq_pair.server.on_publish(on_publish)
+
+    publication = await moq_pair.client.publish(NAMESPACE, TRACK_NAME, TRACK_ALIAS)
+
+    # EXPIRES はミリ秒単位の vi64 として届く
+    # (draft-ietf-moq-transport-21 §9.20.6 (EXPIRES Parameter))
+    assert moqt.PARAM_EXPIRES in publication.parameters
+    encoded = publication.parameters[moqt.PARAM_EXPIRES]
+    assert isinstance(encoded, bytes)
+    assert moqt.decode_varint(encoded) == (expires_ms, len(encoded))
+
+    # Track Properties を運ばない応答では空の辞書になる
+    assert publication.track_properties == {}

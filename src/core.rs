@@ -1023,6 +1023,13 @@ pub(crate) struct CoreEvent {
     subgroup_id: Option<u64>,
     /// 受信したメッセージのパラメータ。
     parameters: Option<Py<PyDict>>,
+    /// 受信した応答メッセージの Track Properties。
+    ///
+    /// 応答が Track Properties を運ぶ場合は型番号をキーにした辞書が入り、運ばない
+    /// 応答では空の辞書になる。応答以外のメッセージでは `None` になる。表現は
+    /// `moqt.moqt.Message.track_properties` と同じである
+    /// (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    track_properties: Option<Py<PyDict>>,
 }
 
 impl CoreEvent {
@@ -1047,6 +1054,7 @@ impl CoreEvent {
             publisher_priority: None,
             subgroup_id: None,
             parameters: None,
+            track_properties: None,
         }
     }
 
@@ -1107,10 +1115,41 @@ impl CoreEvent {
         }
     }
 
+    /// 受信した応答メッセージが運ぶ Track Properties を設定する。
+    fn with_track_properties(mut self, track_properties: Option<Py<PyDict>>) -> Self {
+        self.track_properties = track_properties;
+        self
+    }
+
     /// 送信元のストリーム ID を設定する。
     fn on_stream(mut self, stream_id: u64) -> Self {
         self.stream_id = Some(stream_id);
         self
+    }
+}
+
+/// 制御メッセージの生バイト列から Track Properties を取り出す。
+///
+/// 状態機械のイベントは応答の Track Properties を運ばないため、受信した生バイト列を
+/// デコードして取り出す。Track Properties を運ばないメッセージと、まだ本文全体が
+/// 揃っていないバイト列では `None` を返す。
+/// (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))
+pub(crate) fn decode_track_properties_data(
+    py: Python<'_>,
+    data: &[u8],
+) -> PyResult<Option<Py<PyDict>>> {
+    let Some((message, _consumed)) = decode_control_message(data).map_err(runtime_error)? else {
+        return Ok(None);
+    };
+    let properties = match message {
+        ControlMessage::SubscribeOk(message) => Some(message.track_properties),
+        ControlMessage::FetchOk(message) => Some(message.track_properties),
+        ControlMessage::RequestOk(message) => Some(message.track_properties),
+        _ => None,
+    };
+    match properties {
+        Some(properties) => Ok(Some(track_properties_to_python(py, &properties)?)),
+        None => Ok(None),
     }
 }
 
@@ -1254,6 +1293,18 @@ impl CoreEvent {
         self.parameters
             .as_ref()
             .map(|parameters| parameters.clone_ref(py))
+    }
+
+    /// 受信した応答メッセージの Track Properties。
+    ///
+    /// 応答が Track Properties を運ぶ場合は型番号をキーにした辞書が入り、運ばない
+    /// 応答では空の辞書になる。応答以外のメッセージでは `None` になる
+    /// (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    #[getter]
+    fn track_properties(&self, py: Python<'_>) -> Option<Py<PyDict>> {
+        self.track_properties
+            .as_ref()
+            .map(|track_properties| track_properties.clone_ref(py))
     }
 
     fn __repr__(&self) -> String {
@@ -1547,13 +1598,15 @@ impl CoreSession {
             } => {
                 let body = PyDict::new(py);
                 body.set_item("request_kind", request_kind_to_python(request_kind))?;
+                let track_properties = decode_track_properties_data(py, &data)?;
                 Ok(CoreEvent::with_message(
                     "request_ok",
                     body.unbind(),
                     data.clone(),
                     Some(request_id),
                     Some(message_parameters_to_python(py, &parameters)?),
-                ))
+                )
+                .with_track_properties(track_properties))
             }
             SessionEvent::FetchOkReceived {
                 request_id,
@@ -1962,6 +2015,10 @@ impl CoreSession {
                         );
                         events.push(
                             CoreEvent::with_message(kind, body, raw, request_id, None)
+                                .with_track_properties(decode_track_properties_data(
+                                    py,
+                                    self.request_buffers.get(stream_id),
+                                )?)
                                 .on_stream(stream_id),
                         );
                         events.extend(self.drain_events(py)?);
@@ -1982,7 +2039,9 @@ impl CoreSession {
                     }
                 }
             }
-            events.extend(self.drain_events(py)?);
+            // 状態機械のイベントは応答メッセージの Track Properties を運ばないため、
+            // 受信した生バイト列を渡して応答イベントへ載せられるようにする
+            events.extend(self.drain_events_with_data(py, raw)?);
         }
 
         Ok(events)

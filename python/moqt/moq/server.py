@@ -176,7 +176,13 @@ class SubscriptionRequest:
         parameters: dict[int, object] | None = None,
         track_properties: dict[int, object] | None = None,
     ) -> Publication:
-        """SUBSCRIBE_OK を返して配信を開始する。"""
+        """SUBSCRIBE_OK を返して配信を開始する。
+
+        返る `Publication` は送った SUBSCRIBE_OK のパラメータと Track Properties を
+        保持する。publisher が購読条件を確定する値 (EXPIRES / LARGEST_OBJECT /
+        GROUP_ORDER / DEFAULT_PUBLISHER_PRIORITY) はここで通知した値である
+        (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+        """
         await self.runtime.send_subscribe_ok(
             self.request_id, track_alias, parameters, track_properties
         )
@@ -186,6 +192,8 @@ class SubscriptionRequest:
             namespace=self.namespace,
             track_name=self.track_name,
             runtime=self.runtime,
+            parameters=dict(parameters or {}),
+            track_properties=dict(track_properties or {}),
         )
 
     async def reject(self, error_code: int, reason: str) -> None:
@@ -309,6 +317,9 @@ class PublisherRequest:
         PUBLISH の応答は REQUEST_OK であり、SUBSCRIBE_OK とは異なり Track Alias を
         運ばない。peer が通知した Track Alias をそのまま使う
         (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))。
+
+        返る `Publication` は送った REQUEST_OK のパラメータと Track Properties を
+        保持する。
         """
         await self.runtime.send_request_ok(self.request_id, parameters, track_properties)
         return Publication(
@@ -317,6 +328,8 @@ class PublisherRequest:
             namespace=self.namespace,
             track_name=self.track_name,
             runtime=self.runtime,
+            parameters=dict(parameters or {}),
+            track_properties=dict(track_properties or {}),
         )
 
     async def reject(self, error_code: int, reason: str) -> None:

@@ -37,6 +37,22 @@ class Publication:
     runtime: Runtime
     """送信に使うランタイム。"""
 
+    parameters: dict[int, object] = field(default_factory=dict)
+    """配信を確立した応答が運んだパラメータ。
+
+    キーはパラメータ型、値はエンコード済みバイト列である。SUBSCRIBE_OK と
+    REQUEST_OK はどちらも publisher が購読条件を確定する値 (EXPIRES /
+    LARGEST_OBJECT / GROUP_ORDER / DEFAULT_PUBLISHER_PRIORITY) を運ぶ
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+    """
+
+    track_properties: dict[int, object] = field(default_factory=dict)
+    """配信を確立した応答が運んだ Track Properties。
+
+    キーは Track Property 型、値は偶数型なら `int`、奇数型なら `bytes` である
+    (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    """
+
     _group_ids: dict[int, int] = field(default_factory=dict)
 
     async def send_object(

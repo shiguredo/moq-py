@@ -112,6 +112,22 @@ class Subscription:
     track_name: bytes
     """Track 名。"""
 
+    parameters: dict[int, object]
+    """SUBSCRIBE_OK が運んだパラメータ。
+
+    キーはパラメータ型、値はエンコード済みバイト列である。AUTHORIZATION_TOKEN は
+    リストになる。EXPIRES / LARGEST_OBJECT / GROUP_ORDER /
+    DEFAULT_PUBLISHER_PRIORITY など publisher が購読条件を確定するために返す値が
+    入る (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))。
+    """
+
+    track_properties: dict[int, object]
+    """SUBSCRIBE_OK が運んだ Track Properties。
+
+    キーは Track Property 型、値は偶数型なら `int`、奇数型なら `bytes` である
+    (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+    """
+
     _objects: asyncio.Queue[MoqtObject | None] = field(default_factory=asyncio.Queue)
     _runtime: Runtime | None = None
 
@@ -501,9 +517,14 @@ class Client:
         track_name: bytes,
         parameters: dict[int, object] | None = None,
     ) -> Subscription:
-        """Track を購読する。"""
+        """Track を購読する。
+
+        返る `Subscription` は SUBSCRIBE_OK が運んだパラメータと Track Properties を
+        保持する。EXPIRES は購読の有効期限、LARGEST_OBJECT は publisher が持つ最新の
+        Location であり、アプリはこれらを見て購読の更新や取得範囲を判断できる。
+        """
         runtime = self._require_runtime()
-        request_id, _event = await runtime.subscribe(namespace, track_name, parameters)
+        request_id, event = await runtime.subscribe(namespace, track_name, parameters)
         # 応答の SUBSCRIBE_OK はパラメータのみを運ぶため、Track Alias は
         # 状態機械から取得する
         track_alias = runtime.subscription_track_alias(request_id)
@@ -512,6 +533,8 @@ class Client:
             track_alias=track_alias,
             namespace=tuple(namespace),
             track_name=track_name,
+            parameters=dict(event.parameters or {}),
+            track_properties=dict(event.track_properties or {}),
             _runtime=runtime,
         )
         self._subscriptions[request_id] = subscription
@@ -534,9 +557,13 @@ class Client:
         `track_properties` は `moqt.moqt.TrackProperties.to_dict()` の形で渡す。
         応答 (REQUEST_OK) を受信してから `Publication` を返す。送信した
         オブジェクトは `Publication.send_object` と `send_datagram` で送る。
+
+        返る `Publication` は REQUEST_OK が運んだパラメータと Track Properties を
+        保持する。EXPIRES は配信の有効期限である
+        (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))。
         """
         runtime = self._require_runtime()
-        request_id, _event = await runtime.publish(
+        request_id, event = await runtime.publish(
             namespace, track_name, track_alias, parameters, track_properties
         )
         return Publication(
@@ -545,6 +572,8 @@ class Client:
             namespace=tuple(namespace),
             track_name=track_name,
             runtime=runtime,
+            parameters=dict(event.parameters or {}),
+            track_properties=dict(event.track_properties or {}),
         )
 
     async def fetch(

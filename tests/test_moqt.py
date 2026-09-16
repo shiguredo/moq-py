@@ -1651,6 +1651,74 @@ def test_subscription_state_accessor_reports_a_pending_subscription() -> None:
     assert established["track_alias"] == 7
 
 
+def test_request_ok_event_reports_the_response_metadata() -> None:
+    """
+    応答イベントが SUBSCRIBE_OK のパラメータと Track Properties を運ぶことを確認する。
+
+    状態機械のイベントは応答のパラメータしか運ばないため、Track Properties は受信した
+    生バイト列から取り出す。パラメータは型番号をキーにしたエンコード済みバイト列の
+    辞書であり、Track Properties は偶数型が `int`、奇数型が `bytes` の辞書である
+    (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters) /
+    §8.4 (Track and Object Properties))。
+    """
+    # 購読を確立し、SUBSCRIBE_OK にパラメータと Track Properties を載せる
+    client, server = _setup()
+    subscribe_events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(subscribe_events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(subscribe_events[0]), "peer")
+    ok = server.send_subscribe_ok(
+        request_id,
+        1,
+        {moqt.PARAM_LARGEST_OBJECT: (3, 4)},
+        {moqt.PROP_DEFAULT_PUBLISHER_PRIORITY: 200, 0x0D: b"\x01\x02"},
+    )
+
+    # 応答は request_ok イベントとして届く
+    events = client.receive_request_stream(4, _message_data(ok[0]), "local")
+    accepted = [event for event in events if event.kind == "request_ok"]
+
+    assert len(accepted) == 1
+    # LARGEST_OBJECT は Group ID と Object ID の 2 つの vi64 である
+    # (draft-ietf-moq-transport-21 §9.20.9 (LARGEST_OBJECT Parameter))
+    assert accepted[0].parameters is not None
+    assert accepted[0].parameters[moqt.PARAM_LARGEST_OBJECT] == encode_varint(3) + encode_varint(4)
+    assert accepted[0].track_properties == {
+        moqt.PROP_DEFAULT_PUBLISHER_PRIORITY: 200,
+        0x0D: b"\x01\x02",
+    }
+
+
+def test_request_ok_event_without_track_properties_reports_an_empty_dict() -> None:
+    """
+    Track Properties を運ばない応答ではイベントの値が空の辞書になることを確認する。
+
+    REQUEST_OK が Track Properties を運べるのは TRACK_STATUS への応答だけであり、
+    TRACK_STATUS の受信側を状態機械は扱わない。ここでは購読の REQUEST_UPDATE_OK を
+    使って、Track Properties を運ばない応答を確かめる
+    (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK) / §9.5 (REQUEST_UPDATE))。
+    """
+    client, server = _setup()
+    subscribe_events = client.send_subscribe([b"ns"], b"t", {})
+    subscription_request_id = _request_id(subscribe_events[0])
+    client.register_local_request_stream(4, subscription_request_id)
+    server.receive_request_stream(4, _message_data(subscribe_events[0]), "peer")
+    ok = server.send_subscribe_ok(subscription_request_id, 1, {}, {})
+    client.receive_request_stream(4, _message_data(ok[0]), "local")
+
+    # REQUEST_UPDATE への応答は同じ request stream で届く
+    update_events = client.send_request_update(subscription_request_id, {})
+    server.receive_request_stream(4, _message_data(update_events[0]), "peer")
+    response = server.send_request_ok(subscription_request_id, {moqt.PARAM_EXPIRES: 1000}, {})
+
+    received = client.receive_request_stream(4, _message_data(response[0]), "local")
+    accepted = [event for event in received if event.kind == "request_ok"]
+
+    assert len(accepted) == 1
+    # 応答が Track Properties を運ばない場合は空の辞書であり、`None` ではない
+    assert accepted[0].track_properties == {}
+
+
 def test_fetch_state_accessors_report_the_fetch() -> None:
     """fetch の状態を Request ID から照会できることを確認する。"""
     client, server = _setup()

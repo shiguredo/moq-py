@@ -886,6 +886,15 @@ class Event:
         data stream は Request ID ではなく Track Alias で購読を特定するため、
         購読との対応付けに使う。
         """
+    @property
+    def track_properties(self, /) -> dict |None:
+        """
+        受信した応答メッセージの Track Properties。
+        
+        応答が Track Properties を運ぶ場合は型番号をキーにした辞書が入り、運ばない
+        応答では空の辞書になる。応答以外のメッセージでは `None` になる
+        (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+        """
 
 @final
 class EventTimeline:

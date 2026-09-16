@@ -63,6 +63,16 @@ class NativeEvent(Protocol):
         ...
 
     @property
+    def track_properties(self) -> dict[int, object] | None:
+        """応答メッセージが運ぶ Track Properties。
+
+        型番号をキーにした辞書である。応答が Track Properties を運ばない場合は
+        `None` になる
+        (draft-ietf-moq-transport-21 §8.4 (Track and Object Properties))。
+        """
+        ...
+
+    @property
     def request_id(self) -> int | None:
         """対象 request の Request ID。"""
         ...
