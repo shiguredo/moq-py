@@ -2464,3 +2464,109 @@ def test_send_object_datagram_evaluates_the_object_status() -> None:
     allowed, events = server.send_object_datagram(request_id, 1, 0, blob, None)
     assert allowed is True
     assert [event.kind for event in events] == []
+
+
+def test_mid_object_fin_closes_the_session() -> None:
+    """
+    オブジェクトのシリアライズ途中で FIN されたストリームを拒否することを確認する。
+
+    draft-ietf-moq-transport-21 §11.3 (Subgroup Streams): "If a stream ends gracefully
+    (i.e., the stream terminates with a FIN) in the middle of a serialized Object, the
+    session SHOULD be closed with a PROTOCOL_VIOLATION." 受信側は decoder の
+    `finish()` で検出し、状態機械へ報告する。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    # Subgroup ヘッダ (SUBGROUP_ID_MODE = 0b01、DEFAULT_PRIORITY) と、ペイロード長 10 を
+    # 宣言したオブジェクトヘッダまでを送る
+    header = encode_varint(0x32) + encode_varint(1) + encode_varint(7)
+    object_header = encode_varint(5) + encode_varint(10)
+    objects, events = client.receive_data_stream(2, header + object_header + b"part", 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+
+    # ペイロードが揃う前に FIN するとセッションが閉じる
+    events = client.receive_data_stream_closed(2, False)
+
+    closes = [event for event in events if event.kind == "close"]
+    assert len(closes) == 1
+    assert closes[0].code == moqt.SESSION_PROTOCOL_VIOLATION
+    assert "middle of a serialized object" in (closes[0].reason or "")
+    assert client.established is False
+
+
+def test_fetch_mid_object_fin_closes_the_session() -> None:
+    """
+    fetch ストリームでもオブジェクトの途中で FIN された場合にセッションを閉じることを確認する。
+
+    fetch ストリームのオブジェクトも同じくシリアライズ途中の FIN を拒否する
+    (draft-ietf-moq-transport-21 §11.3 (Subgroup Streams))。
+    """
+    client, server = _setup()
+    request_id = _fetch_round_trip(client, server, 4)
+
+    # FETCH_HEADER と、ペイロード長 8 を宣言したオブジェクトヘッダまでを送る
+    stream = (
+        encode_varint(moqt.FETCH_HEADER_TYPE)
+        + encode_varint(request_id)
+        + encode_varint(0x1F)
+        + encode_varint(5)
+        + encode_varint(0)
+        + encode_varint(2)
+        + bytes([128])
+        + encode_varint(8)
+        + b"part"
+    )
+    objects, _events = client.receive_data_stream(2, stream, moqt.FETCH_HEADER_TYPE)
+    assert objects == []
+
+    events = client.receive_data_stream_closed(2, False)
+
+    closes = [event for event in events if event.kind == "close"]
+    assert len(closes) == 1
+    assert closes[0].code == moqt.SESSION_PROTOCOL_VIOLATION
+    assert client.established is False
+
+
+def test_mid_object_reset_does_not_close_the_session() -> None:
+    """
+    RESET_STREAM による途中終了はプロトコル違反にしないことを確認する。
+
+    draft-ietf-moq-transport-21 §11.3 (Subgroup Streams) の途中終了の検査は graceful な
+    FIN に対するものであり、RESET による破棄は別経路である
+    (§11.3.2 (Closing Subgroup Streams))。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    header = encode_varint(0x32) + encode_varint(1) + encode_varint(7)
+    object_header = encode_varint(5) + encode_varint(10)
+    client.receive_data_stream(2, header + object_header + b"part", 0x10)
+
+    # RESET_STREAM による終端ではセッションを閉じない
+    events = client.receive_data_stream_closed(2, True, 0x1)
+
+    assert [event for event in events if event.kind == "close"] == []
+    assert client.established is True
+
+
+def test_empty_subgroup_fin_is_accepted() -> None:
+    """
+    ヘッダのみで FIN した空の Subgroup が正常に受理されることを確認する。
+
+    配達対象のオブジェクトが 1 つも無いとき、送信側はヘッダのみを送って FIN で閉じる
+    (draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams))。受信側はこれを
+    プロトコル違反にしてはならない。
+    """
+    client, server = _setup()
+    _subscribe_round_trip(client, server, 4)
+
+    header = encode_varint(0x32) + encode_varint(1) + encode_varint(7)
+    objects, events = client.receive_data_stream(2, header, 0x10)
+    assert objects == []
+
+    events = client.receive_data_stream_closed(2, False)
+
+    assert [event for event in events if event.kind == "close"] == []
+    assert client.established is True

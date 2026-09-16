@@ -1612,6 +1612,24 @@ impl CoreSession {
         Ok(Some(group_order))
     }
 
+    /// 終端したデータストリームのデコーダがオブジェクトの途中で終わっていないかを調べる。
+    ///
+    /// `SubgroupStreamDecoder::finish` / `FetchStreamDecoder::finish` は、ヘッダ未受信・
+    /// オブジェクトヘッダの途中・未消費ペイロードのいずれかが残っていれば
+    /// `UnexpectedEof` を返す。ヘッダのみでオブジェクトを持たない空の Subgroup と
+    /// 空の FETCH 応答は正常として受理する
+    /// (draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) /
+    /// §9.11 (FETCH))。padding stream はバイト列を読み捨てるだけでオブジェクトを
+    /// 持たない (draft-ietf-moq-transport-21 §11.5.1 (Padding Streams))。
+    /// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+    fn take_mid_object_fin(&mut self, stream_id: u64) -> bool {
+        match self.data_decoders.remove(&stream_id) {
+            Some(DataStreamDecoder::Subgroup(decoder)) => decoder.finish().is_err(),
+            Some(DataStreamDecoder::Fetch(decoder)) => decoder.finish().is_err(),
+            Some(DataStreamDecoder::Padding) | None => false,
+        }
+    }
+
     /// 状態機械が発行したイベントをすべて取り出す。
     fn drain_events(&mut self, py: Python<'_>) -> PyResult<Vec<CoreEvent>> {
         self.drain_events_with_data(py, Vec::new())
@@ -2414,8 +2432,11 @@ impl CoreSession {
         error_code: Option<u64>,
         reliable_size: Option<u64>,
     ) -> PyResult<Vec<CoreEvent>> {
+        // デコーダは終端処理で破棄する。FIN の場合はオブジェクトのシリアライズ途中で
+        // 終わっていないかも併せて検査する
+        let unfinished = self.take_mid_object_fin(stream_id);
+        let mid_object_fin = unfinished && !reset;
         self.data_buffers.remove(stream_id);
-        self.data_decoders.remove(&stream_id);
         self.data_headers.remove(&stream_id);
         self.pending_subgroup_objects.remove(&stream_id);
         self.pending_fetch_entries.remove(&stream_id);
@@ -2426,6 +2447,15 @@ impl CoreSession {
         self.session
             .recv_data_stream_closed(DataStreamId(stream_id), end)
             .map_err(runtime_error)?;
+
+        if mid_object_fin {
+            // オブジェクトのシリアライズ途中での FIN はプロトコル違反である。状態機械へ
+            // 報告してセッションを閉じる。`report_mid_object_fin` は呼び出し自体が
+            // セッションを閉じる判断であり、返るエラーは期待どおりの結果である。
+            // 閉じるイベントは `drain_events` が取り出す
+            // (draft-ietf-moq-transport-21 §11.3 (Subgroup Streams))。
+            let _ = self.session.report_mid_object_fin(DataStreamId(stream_id));
+        }
         self.drain_events(py)
     }
 
