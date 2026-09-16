@@ -1,7 +1,7 @@
 # 同一 subscription で 2 つ目の Group を送ると Object ID の差分が負になる
 
 - Created: 2026-09-16
-- Completed:
+- Completed: 2026-09-16
 - Branch: feature/fix-subgroup-object-id-delta-across-groups
 - Polished:
 
@@ -48,3 +48,13 @@ Object ID の差分の基準を「同じ subgroup ストリーム内の直前の
 - 2 つ目の Group のオブジェクトが受信側で正しい Group ID と Object ID で観測されること
 - 同じ Group 内の 2 件目以降は従来どおり差分で表現されること
 - e2e テストで確認できること
+
+## 解決方法
+
+`moq._runtime.Runtime.send_subgroup_object` の Object ID 差分の計算で、新しい subgroup
+ストリームを開く場合 (`opens_stream` が真) は絶対値を使うようにした。差分の基準は
+「同じ subgroup ストリーム内の直前のオブジェクト」だけであり、Group が変わると基準が
+無くなる。
+
+`tests/test_e2e.py` の `test_objects_in_a_second_group_are_delivered` で、Group 1 の 2 件と
+Group 2 の 1 件が正しい Group ID と Object ID で届くことを確認する。
