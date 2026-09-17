@@ -17,30 +17,33 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 
 ## moqt-py について
 
-moqt-py は IETF Media over QUIC (MoQ) を扱う Python ライブラリです。中継 (relay) は含みません。API は 2 層に分かれています。
+moqt-py は Media over QUIC Transport (MoQT) を扱う Python ライブラリです。中継 (relay) は含みません。API は 2 層に分かれています。
 
 - `moqt.moq`: WebTransport 上で MoQT セッションを扱う高レベル API (client / server)
 - `moqt.moqt` / `moqt.loc` / `moqt.msf`: MoQT の codec と sans I/O セッション状態機械、LOC と MSF の codec を直接扱う低レベル API
 
 実装には次のライブラリを利用しています。
 
-- MoQT の codec と Session 状態機械、LOC と MSF の codec に [moqt-rs](https://github.com/shiguredo/moqt-rs) を PyO3 経由で利用しています
+- MoQT の codec とセッション状態機械、LOC と MSF の codec に [moqt-rs](https://github.com/shiguredo/moqt-rs) を PyO3 経由で利用しています
 - WebTransport over HTTP/3 の I/O に [webtransport-py](https://pypi.org/project/webtransport-py/) を利用しています
 
 ## 対応仕様
 
-- Media over QUIC Transport: draft-ietf-moq-transport-21
-- Low Overhead Media Container: draft-ietf-moq-loc-04
-- MOQT Streaming Format: draft-ietf-moq-msf-01
+- Media over QUIC Transport: [draft-ietf-moq-transport-21](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-21)
+- Low Overhead Media Container: [draft-ietf-moq-loc-04](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04)
+- MOQT Streaming Format: [draft-ietf-moq-msf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01)
 
 いずれも draft 由来であり、将来の改訂で変更される可能性があります。対応仕様は moqt-rs に追従します。
 
 ## 対応プラットフォーム
 
-wheel は配布しておらず、Rust 1.93 以降の toolchain を使ってソースからビルドします。開発と CI で確認している環境は次のとおりです。
+wheel は配布しておらず、Rust 1.93 以降の toolchain を使ってソースからビルドします。GitHub Actions の CI で確認している環境は次のとおりです。
 
 - macOS 26 arm64
-- Ubuntu 24.04 x86_64 (GitHub Actions の `ubuntu-latest`)
+- Ubuntu 26.04 x86_64
+- Ubuntu 26.04 arm64
+- Ubuntu 24.04 x86_64
+- Ubuntu 24.04 arm64
 
 ## 対応 Python
 
@@ -53,7 +56,7 @@ wheel は配布しておらず、Rust 1.93 以降の toolchain を使ってソ�
 uv add moqt-py
 ```
 
-## 使い方（高レベル API）
+## 使い方 (高レベル API)
 
 `moqt.moq` が提供する高レベル API です。WebTransport の接続と MoQT セッションをまとめて扱います。
 
@@ -117,9 +120,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`certfile` と `keyfile` には WebTransport のサーバー証明書を指定します。開発用の自己署名証明書は `moqt.moq.testing.generate_certificates` が `cert.pem` と `key.pem` を書き出します (`moqt-py[testing]` が必要です)。
+
 ### オブジェクトの送信
 
-`Publication.send_object` は subgroup ストリームで、`send_datagram` はデータグラムで送ります。
+`Publication.send_object` は subgroup ストリームで、`Publication.send_datagram` はデータグラムで送ります。Subgroup ID のモードは Group ごとに固定されるため、モードを変えるときは Group を分けます (draft-ietf-moq-transport-21 §11.3.1)。
 
 ```python
 from moqt import moqt
@@ -130,31 +135,31 @@ await publication.send_object(1, 0, b"payload")
 
 # Subgroup ID を明示する
 await publication.send_object(
-    1,
-    1,
+    2,
+    0,
     b"payload",
     subgroup_id=3,
     subgroup_id_mode=SUBGROUP_ID_MODE_EXPLICIT,
 )
 
-# Subgroup ID を最初の Object ID にする。Subgroup ID フィールドを送らない分だけ wire が短くなる
-await publication.send_object(1, 2, b"payload", subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID)
+# Subgroup ID を最初の Object ID にする。Subgroup ID を明示するモードと比べて
+# Subgroup ID フィールドの分だけ wire が短くなる
+await publication.send_object(3, 0, b"payload", subgroup_id_mode=SUBGROUP_ID_MODE_FIRST_OBJECT_ID)
 
 # End of Group を通知する。このとき payload は空でなければならない
-await publication.send_object(1, 3, b"", status=moqt.OBJECT_STATUS_END_OF_GROUP)
+await publication.send_object(4, 0, b"", status=moqt.OBJECT_STATUS_END_OF_GROUP)
 
 # データグラムで送る
-await publication.send_datagram(1, 0, b"datagram payload")
+await publication.send_datagram(5, 0, b"datagram payload")
 ```
 
-受信側では、Subgroup ID を最初の Object ID として決めるモードでも、最初のオブジェクトを
-受信した時点で `MoqtObject.subgroup_id` に値が入ります
-(draft-ietf-moq-transport-21 §11.3.1)。
+同じ Location のオブジェクトは subgroup とデータグラムのどちらか一方しか届きません。データグラムで送るオブジェクトには、subgroup で送ったオブジェクトと重複しない Location を選んでください。
+
+受信側では、Subgroup ID を最初の Object ID として決めるモードでも、最初のオブジェクトを受信した時点で `MoqtObject.subgroup_id` に値が入ります (draft-ietf-moq-transport-21 §11.3.1)。
 
 > [!WARNING]
 >
 > - データグラムは経路 MTU を超えると通知なく破棄され、送信側からは検知できません (draft-ietf-moq-transport-21 §11.2.1)。`moqt.moqt.MAX_DATAGRAM_SIZE` を超えるデータグラムを送ると警告を記録します。大きいオブジェクトは subgroup ストリームで送ってください
-> - 中継 (relay) は含みません
 
 ### moqt.moq.testing
 
@@ -186,13 +191,13 @@ async def test_objects_are_delivered(moq_pair: MoqPair) -> None:
     assert received[0].payload == b"hello"
 ```
 
-`moqt.moq.testing` は `pytest` / `pytest-asyncio` / `cryptography` を使います。
+`moqt.moq.testing` は `pytest` / `pytest-asyncio` / `cryptography` を使います。非同期のテストを実行するため、`pyproject.toml` で `asyncio_mode = "auto"` を設定するか、テストに `@pytest.mark.asyncio` を付けます。
 
 ```bash
 uv add "moqt-py[testing]"
 ```
 
-## 使い方（低レベル API）
+## 使い方 (低レベル API)
 
 ### moqt.moqt
 
@@ -260,16 +265,12 @@ timeline.add(1000, 1, 2, 0)
 print(msf.MediaTimeline.decode(timeline.encode(gzip=True)).entries)
 ```
 
-## 開発
-
-開発ビルド、テスト、Git フック、moqt-rs への追従は [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) を参照してください。
-
-## moqt-py ライセンス
+## ライセンス
 
 Apache License 2.0
 
 ```text
-Copyright 2026, Shiguredo Inc.
+Copyright 2026 Shiguredo Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
