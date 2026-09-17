@@ -194,6 +194,48 @@ def test_request_stream_close_is_ignored_after_the_first_notification() -> None:
     client.receive_request_stream_closed(stream_id, True, 0)
 
 
+def test_responder_fin_asks_the_requester_to_finish_its_direction() -> None:
+    """
+    responder の FIN を受けた requester に、送信方向を FIN で閉じるよう依頼することを
+    確認する。
+
+    draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure):
+    「応答とその後のメッセージを送った後の responder の FIN は request の完了を示し、
+    まだ閉じていない requester は自分の方向へ FIN を送る SHOULD がある」。
+    SUBSCRIBE では購読を開始した subscriber が requester である
+    (同 §3.1 (Subscriptions))。実際に FIN を送るかは I/O 層が判断するため、ここでは
+    依頼のイベントだけを確認する。この節番号・規則は draft 由来であり将来 draft 改定で
+    変わる可能性がある。
+    """
+    client, server = _setup()
+    stream_id = 4
+    _subscribe_round_trip(client, server, stream_id)
+
+    # responder (server) の終端を FIN として通知する
+    events = client.receive_request_stream_closed(stream_id, False, None)
+
+    assert [event.kind for event in events] == ["finish_request_stream", "request_terminated"]
+
+
+def test_responder_fin_does_not_ask_the_responder_to_finish_its_direction() -> None:
+    """
+    responder 側では送信方向を閉じる依頼をイベントにしないことを確認する。
+
+    自側が responder (publisher 役) の場合は購読の終了時に PUBLISH_DONE を送ってから
+    FIN する必要があり、requester の FIN を受けた時点で送信方向を閉じると
+    PUBLISH_DONE を送れなくなる
+    (draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure))。
+    """
+    client, server = _setup()
+    stream_id = 4
+    _subscribe_round_trip(client, server, stream_id)
+
+    # requester (client) の終端を FIN として通知する
+    events = server.receive_request_stream_closed(stream_id, False, None)
+
+    assert [event.kind for event in events] == ["request_terminated"]
+
+
 # ─── SETUP と制御ストリーム ─────────────────────────────────
 
 

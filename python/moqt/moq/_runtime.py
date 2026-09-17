@@ -1312,6 +1312,8 @@ class Runtime:
                 await self._reset_request_stream(event)
             elif kind == "stop_sending_request_stream":
                 await self._stop_sending_request_stream(event)
+            elif kind == "finish_request_stream":
+                await self._finish_request_stream(event)
             elif kind == "established":
                 await self._notify(self._events.on_established)
             elif kind == "close":
@@ -1402,6 +1404,32 @@ class Runtime:
             return
         with contextlib.suppress(Exception):
             await self._ops.stop_sending(stream_id, int(event.code or 0))
+
+    async def _finish_request_stream(self, event: NativeEvent) -> None:
+        """requester として開いた request stream の送信方向を FIN で閉じる。
+
+        responder が応答とその後のメッセージを送り終えて FIN を送ると、request は
+        完了したとみなされる。requester も送信方向を FIN で閉じることが SHOULD で
+        求められている (draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream
+        Closure))。この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+
+        既に FIN した request では `_request_streams` からエントリが消えているため、
+        何もせずに戻る。アプリが独自に FIN した後に本イベントが届く場合があり、
+        I/O 層で無視することが状態機械からも要求されている。
+
+        現状の webtransport-py はピアの FIN を上位層へ通知しないため、通常の FIN 受信では
+        本イベントは届かない。`on_stream_end` が追加された時点でこの経路が有効になる。
+        現時点で届くのは、アプリコードとして解釈できない RESET_STREAM を受信して
+        I/O 層が FIN とみなした場合だけである。
+        """
+        request_id = event.request_id
+        stream_id = self._request_streams.pop(request_id, None) if request_id is not None else None
+        if stream_id is None:
+            return
+        self._streams.pop(stream_id, None)
+        # FIN だけを送るためペイロードは空にする
+        with contextlib.suppress(Exception):
+            await self._ops.send_stream_data(stream_id, b"", True)
 
     async def _handle_data_control(self, event: NativeEvent) -> None:
         """データストリームの制御イベントを処理する。"""

@@ -1899,6 +1899,13 @@ impl CoreSession {
                     None,
                 )
             }),
+            SessionEvent::FinishRequestStream { request_id } => Ok(CoreEvent::with_message(
+                "finish_request_stream",
+                PyDict::new(py).unbind(),
+                data.clone(),
+                Some(request_id),
+                None,
+            )),
         }
     }
 }
