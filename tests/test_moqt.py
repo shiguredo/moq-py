@@ -370,8 +370,11 @@ def test_range_filter_requires_the_peer_to_declare_max_filter_ranges() -> None:
     自側 SETUP の MAX_FILTER_RANGES が 0 でない場合だけ許される。
     """
     # SetID=0 で Object ID 0..=1 を指定する Range Filter
-    # (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))
-    object_id_filter = bytes([0]) + encode_varint(0) + encode_varint(1)
+    # (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+    # パラメータの値は長さプレフィックスを含むエンコード済みの形である
+    # (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))
+    object_id_filter_body = bytes([0]) + encode_varint(0) + encode_varint(1)
+    object_id_filter = encode_varint(len(object_id_filter_body)) + object_id_filter_body
 
     # 宣言が無ければ送信できない
     client, _server = _setup()
@@ -1153,6 +1156,108 @@ def test_message_parameters_round_trips_the_encoded_dictionary() -> None:
     assert MessageParameters(parameters.to_dict()) == parameters
 
 
+def test_send_accepts_the_encoded_parameter_dictionary() -> None:
+    """
+    `MessageParameters.to_dict()` の辞書をそのまま送信経路へ渡せることを確認する。
+
+    パラメータの値は `Event.parameters` / `Message.parameters` が返すものと同じ
+    「長さプレフィックスを含むエンコード済みバイト列」である。受信側は同じ値として
+    解釈しなければならない (draft-ietf-moq-transport-21 §8.3
+    (Key-Value-Pair Structure))。
+    """
+    # Range Filter は peer が SETUP で MAX_FILTER_RANGES を宣言している場合だけ送れる
+    # (draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES))
+    client = Session.client("c")
+    server = Session.server("s", {moqt.SETUP_OPTION_MAX_FILTER_RANGES: 8})
+    client_setup = client.start()
+    server_setup = server.start()
+    server.receive_control(client_setup)
+    client.receive_control(server_setup)
+
+    # Range Filter の本体は `SetID (8 bits) | Start Delta (vi64) | End Delta (vi64)` である
+    # (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))
+    range_filter_body = bytes([0]) + encode_varint(10) + encode_varint(0)
+    parameters = MessageParameters(
+        {
+            moqt.PARAM_LOCATION_FILTER: LocationFilter(
+                "absolute_start", start_group=9, start_object=0
+            ),
+            moqt.PARAM_OBJECTID_FILTER: encode_varint(len(range_filter_body)) + range_filter_body,
+            moqt.PARAM_FORWARD: 1,
+        }
+    )
+
+    # 型付きの値から作った辞書をそのまま送る
+    events = client.send_subscribe([b"ns"], b"t", parameters.to_dict())
+    assert [event.kind for event in events] == ["send_request"]
+
+    # 受信側では同じパラメータとして解釈される
+    received = server.receive_request_stream(4, _message_data(events[0]), "peer")
+    subscribe = [event for event in received if event.kind == "subscribe"]
+    assert len(subscribe) == 1
+    assert subscribe[0].message is not None
+    round_tripped = MessageParameters(subscribe[0].message["parameters"])
+    assert round_tripped.to_dict() == parameters.to_dict()
+    assert round_tripped.location_filter_typed == LocationFilter(
+        "absolute_start", start_group=9, start_object=0
+    )
+    assert round_tripped.forward == 1
+    assert round_tripped.range_filters(moqt.PARAM_OBJECTID_FILTER) == [range_filter_body]
+
+
+def test_send_accepts_the_parameters_of_a_received_message() -> None:
+    """
+    受信したメッセージのパラメータをそのまま送信経路へ渡せることを確認する。
+
+    受信側が返す辞書と送信側が取る辞書は同じ形式であり、受け取った購読条件を
+    そのまま別のセッションの購読へ引き継げる。
+    """
+    client, server = _setup()
+    parameters = {
+        moqt.PARAM_LOCATION_FILTER: LocationFilter("relative_group", start_group=2),
+        moqt.PARAM_FORWARD: 1,
+        moqt.PARAM_SUBSCRIBER_PRIORITY: 10,
+    }
+    events = client.send_subscribe([b"ns"], b"t", parameters)
+    received = server.receive_request_stream(4, _message_data(events[0]), "peer")
+    subscribe = [event for event in received if event.kind == "subscribe"]
+    assert subscribe[0].message is not None
+    received_parameters = subscribe[0].message["parameters"]
+
+    # 受信した辞書をそのまま別のセッションの購読へ渡す
+    client2, server2 = _setup()
+    events2 = client2.send_subscribe([b"ns"], b"t", received_parameters)
+    received2 = server2.receive_request_stream(4, _message_data(events2[0]), "peer")
+    subscribe2 = [event for event in received2 if event.kind == "subscribe"]
+    assert subscribe2[0].message is not None
+    assert subscribe2[0].message["parameters"] == received_parameters
+    round_tripped = MessageParameters(subscribe2[0].message["parameters"])
+    assert round_tripped.location_filter_typed == LocationFilter("relative_group", start_group=2)
+    assert round_tripped.forward == 1
+    assert round_tripped.subscriber_priority == 10
+
+
+def test_send_rejects_a_filter_body_without_a_length_prefix() -> None:
+    """
+    長さプレフィックスを持たないフィルタ本体を送信経路が拒否することを確認する。
+
+    `LocationFilter.encode` が返すのはフィルタ本体であり、パラメータの値ではない。
+    長さが合わない値を黙って別のフィルタとして解釈しないよう拒否する
+    (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+    """
+    client, _server = _setup()
+
+    with pytest.raises(ValueError, match="requires an encoded value"):
+        client.send_subscribe(
+            [b"ns"], b"t", {moqt.PARAM_LOCATION_FILTER: LocationFilter("next_object").encode()}
+        )
+
+    with pytest.raises(ValueError, match="requires an encoded value"):
+        client.send_subscribe(
+            [b"ns"], b"t", {moqt.PARAM_OBJECTID_FILTER: bytes([0]) + encode_varint(10)}
+        )
+
+
 def test_message_parameters_accepts_typed_values() -> None:
     """型ごとの Python 表現からも構築できることを確認する。"""
     parameters = MessageParameters(
@@ -1234,10 +1339,10 @@ def test_message_parameters_rejects_raw_filter_bytes() -> None:
     """
     長さプレフィックスを持たないフィルタのバイト列を拒否することを確認する。
 
-    `MessageParameters` が取る辞書の値は `Event.parameters` と同じエンコード済みの
-    バイト列であり、`Session.send_subscribe` などが取る長さプレフィックスを含まない
-    フィルタ本体とは異なる。取り違えを黙って別の値として解釈しないよう、長さが
-    合わない値は拒否する (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+    パラメータの値は `Event.parameters` / `Message.parameters` と同じ「長さプレフィックスを
+    含むエンコード済みバイト列」であり、`LocationFilter.encode` が返すフィルタ本体は
+    そのままでは渡せない。取り違えを黙って別の値として解釈しないよう、長さが合わない
+    値は拒否する (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
     """
     with pytest.raises(ValueError, match="requires an encoded value"):
         MessageParameters({moqt.PARAM_LOCATION_FILTER: LocationFilter("next_object").encode()})
@@ -2492,9 +2597,10 @@ def test_received_subgroup_filtered_out_is_ignored_without_closing_the_session()
     (draft-ietf-moq-transport-21 §3.1 (Subscriptions) のフィルタ再適用)。
     """
     client, server = _setup()
-    # Group 9 以降だけを購読する Location Filter
+    # Group 9 以降だけを購読する Location Filter。
+    # パラメータの値は型付きの LocationFilter をそのまま渡せる
     absolute = LocationFilter("absolute_start", start_group=9, start_object=0)
-    events = client.send_subscribe([b"ns"], b"t", {moqt.PARAM_LOCATION_FILTER: absolute.encode()})
+    events = client.send_subscribe([b"ns"], b"t", {moqt.PARAM_LOCATION_FILTER: absolute})
     request_id = _request_id(events[0])
     client.register_local_request_stream(4, request_id)
     server.receive_request_stream(4, _message_data(events[0]), "peer")

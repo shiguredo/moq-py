@@ -1116,10 +1116,11 @@ class LocationFilter:
         """
     def encode(self, /) -> bytes:
         """
-        LOCATION_FILTER の値部分をバイト列へ書き出す。
+        LOCATION_FILTER のフィルタ本体をバイト列へ書き出す。
         
-        書き出したバイト列は `MessageParameters` の辞書の値として渡せる
-        (パラメータ 1 件分のエンコード済みバイト列)。
+        長さプレフィックスを含まないため、パラメータ辞書の値にはそのまま使えない。
+        辞書の値にする場合は [`MessageParameters::to_dict`] を使うか、この
+        `LocationFilter` をそのまま辞書の値として渡す。
         """
     @property
     def end_group_delta(self, /) -> int |None:
@@ -1303,6 +1304,9 @@ class MessageParameters:
         長さ付きバイト列のパラメータは、長さプレフィックスを含むエンコード済みの値を
         要求する。長さが合わない値と解釈できない値は `ValueError` になる。
         この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+        
+        この辞書は `Session.send_subscribe` などの送信経路へそのまま渡せる。形式は
+        受信側が返す辞書と同一である。
         """
     def __repr__(self, /) -> str: ...
     def authorization_tokens(self, /) -> list[Any]:

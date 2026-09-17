@@ -14,104 +14,14 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::{
     LocationFilter as MoqtLocationFilter, LocationFilterUpdate as MoqtLocationFilterUpdate,
-    MessageParameter, MessageParameterValue, MessageParameters as MoqtMessageParameters,
-    PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_LOCATION_FILTER,
-    PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_PRIORITY_FILTER,
-    PARAM_SUBGROUP_FILTER, PARAM_TRACK_PROPERTY_FILTER,
+    MessageParameterValue, MessageParameters as MoqtMessageParameters,
 };
 
 use crate::core::{
-    decode_parameter_entry, decode_varint_prefix, message_parameters_to_python,
-    parameter_value_from_python, parameter_value_to_python, track_namespace_to_python,
+    message_parameters_from_python, message_parameters_to_python, parameter_value_to_python,
+    track_namespace_to_python,
 };
 use crate::errors::codec_error;
-
-/// 値が長さ付きバイト列であるパラメータ型かを返す。
-///
-/// これらの型の値は先頭の vi64 が値本体の長さである
-/// (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
-fn is_length_prefixed(param_type: u64) -> bool {
-    matches!(
-        param_type,
-        PARAM_AUTHORIZATION_TOKEN
-            | PARAM_LOCATION_FILTER
-            | PARAM_SUBGROUP_FILTER
-            | PARAM_OBJECTID_FILTER
-            | PARAM_PRIORITY_FILTER
-            | PARAM_OBJECT_PROPERTY_FILTER
-            | PARAM_TRACK_PROPERTY_FILTER
-            | PARAM_FILL_PARAMETERS
-    )
-}
-
-/// 長さ付きバイト列のパラメータの値がエンコード済みであることを検証する。
-///
-/// フィルタ本体のような長さプレフィックスを持たない生バイト列を渡した場合に、
-/// 黙って別の値として解釈しないよう長さを照合する。
-fn validate_encoded_value(param_type: u64, value: &[u8]) -> PyResult<()> {
-    if !is_length_prefixed(param_type) {
-        return Ok(());
-    }
-    let Some((declared, prefix_len)) = decode_varint_prefix(value).map_err(codec_error)? else {
-        return Err(PyValueError::new_err(format!(
-            "message parameter {param_type:#x} requires an encoded value with a length prefix, got {} bytes",
-            value.len()
-        )));
-    };
-    let remaining = (value.len() - prefix_len) as u64;
-    if declared != remaining {
-        return Err(PyValueError::new_err(format!(
-            "message parameter {param_type:#x} requires an encoded value: the length prefix declares {declared} bytes but {remaining} bytes follow"
-        )));
-    }
-    Ok(())
-}
-
-/// パラメータ 1 件を「エンコード済みバイト列の辞書」の値から構築する。
-///
-/// `bytes` はエンコード済みの値、[`LocationFilter`] は LOCATION_FILTER の型付き表現、
-/// それ以外は型ごとの Python 表現として解釈する。
-fn parameter_from_dict(param_type: u64, value: &Bound<'_, PyAny>) -> PyResult<MessageParameter> {
-    // 型付きのフィルタは長さプレフィックスを持たないため、先に受け付ける
-    if param_type == PARAM_LOCATION_FILTER
-        && let Ok(filter) = value.cast::<LocationFilter>()
-    {
-        return Ok(MessageParameter {
-            param_type,
-            value: MessageParameterValue::LengthPrefixed(filter.borrow().inner.encode_to_bytes()),
-        });
-    }
-    if let Ok(encoded) = value.cast::<PyBytes>() {
-        validate_encoded_value(param_type, encoded.as_bytes())?;
-        return decode_parameter_entry(param_type, encoded.as_bytes());
-    }
-    Ok(MessageParameter {
-        param_type,
-        value: parameter_value_from_python(param_type, value)?,
-    })
-}
-
-/// Python 側の辞書から `MessageParameters` を構築する。
-///
-/// キーはパラメータ型、値はパラメータ 1 件分のエンコード済みバイト列である。
-/// AUTHORIZATION_TOKEN は複数回出現できるため、値にリストを渡した場合は同じ型を
-/// 複数回追加する。
-fn message_parameters_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<MoqtMessageParameters> {
-    let mut parameters = MoqtMessageParameters::new();
-    for (key, item) in dict.iter() {
-        let param_type = key.extract::<u64>()?;
-        if param_type == PARAM_AUTHORIZATION_TOKEN
-            && let Ok(tokens) = item.cast::<PyList>()
-        {
-            for token in tokens.iter() {
-                parameters.push(parameter_from_dict(param_type, &token)?);
-            }
-            continue;
-        }
-        parameters.push(parameter_from_dict(param_type, &item)?);
-    }
-    Ok(parameters)
-}
 
 /// LOCATION_FILTER (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter)) の
 /// 型付き表現。
@@ -138,6 +48,14 @@ impl LocationFilter {
     /// `MoqtLocationFilter` を包む。
     fn wrap(inner: MoqtLocationFilter) -> Self {
         Self { inner }
+    }
+
+    /// フィルタ本体 (長さプレフィックスを含まない) をバイト列へ書き出す。
+    ///
+    /// パラメータの値は長さプレフィックスを含む形で組み立てるため、この本体は
+    /// 呼び出し元が長さ付きの値として包む。
+    pub(crate) fn body_bytes(&self) -> Vec<u8> {
+        self.inner.encode_to_bytes()
     }
 }
 
@@ -299,10 +217,11 @@ impl LocationFilter {
         ))
     }
 
-    /// LOCATION_FILTER の値部分をバイト列へ書き出す。
+    /// LOCATION_FILTER のフィルタ本体をバイト列へ書き出す。
     ///
-    /// 書き出したバイト列は `MessageParameters` の辞書の値として渡せる
-    /// (パラメータ 1 件分のエンコード済みバイト列)。
+    /// 長さプレフィックスを含まないため、パラメータ辞書の値にはそのまま使えない。
+    /// 辞書の値にする場合は [`MessageParameters::to_dict`] を使うか、この
+    /// `LocationFilter` をそのまま辞書の値として渡す。
     fn encode<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.inner.encode_to_bytes())
     }
@@ -444,11 +363,14 @@ impl MessageParameters {
     /// 長さ付きバイト列のパラメータは、長さプレフィックスを含むエンコード済みの値を
     /// 要求する。長さが合わない値と解釈できない値は `ValueError` になる。
     /// この節番号・規則は draft 由来であり将来の改訂で変更されうる。
+    ///
+    /// この辞書は `Session.send_subscribe` などの送信経路へそのまま渡せる。形式は
+    /// 受信側が返す辞書と同一である。
     #[new]
     #[pyo3(signature = (parameters = None))]
     fn new(parameters: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let inner = match parameters {
-            Some(parameters) => message_parameters_from_dict(parameters)?,
+            Some(parameters) => message_parameters_from_python(parameters)?,
             None => MoqtMessageParameters::new(),
         };
         Ok(Self { inner })

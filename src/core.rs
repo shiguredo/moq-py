@@ -22,6 +22,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::errors::{codec_error, runtime_error};
+use crate::message_parameters::LocationFilter;
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::message::common::{Location, TrackNamespace};
@@ -193,11 +194,99 @@ fn reason_from_python(reason: &str) -> PyResult<shiguredo_moqt::message::ReasonP
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-/// パラメータ型に応じて Python 側の値をライブラリの型へ変換する。
+/// 値が長さ付きバイト列であるパラメータ型かを返す。
 ///
-/// `LOCATION_FILTER` などの構造化された値は、ライブラリが解釈できる
-/// エンコード済みバイト列として受け取る。
-pub(crate) fn parameter_value_from_python(
+/// これらの型の値は先頭の vi64 が値本体の長さである
+/// (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
+fn is_length_prefixed(param_type: u64) -> bool {
+    matches!(
+        param_type,
+        PARAM_AUTHORIZATION_TOKEN
+            | PARAM_LOCATION_FILTER
+            | PARAM_SUBGROUP_FILTER
+            | PARAM_OBJECTID_FILTER
+            | PARAM_PRIORITY_FILTER
+            | PARAM_OBJECT_PROPERTY_FILTER
+            | PARAM_TRACK_PROPERTY_FILTER
+            | PARAM_FILL_PARAMETERS
+    )
+}
+
+/// エンコード済みの値が必要なパラメータ型について、値の作り方を返す。
+///
+/// フィルタ本体のような長さプレフィックスを持たないバイト列を渡されたときに、
+/// どう直せばよいかをエラーメッセージで示すために使う。
+fn encoded_value_hint(param_type: u64) -> &'static str {
+    if param_type == PARAM_LOCATION_FILTER {
+        "pass the filter as a LocationFilter or use MessageParameters.to_dict()"
+    } else {
+        "build the value with encode_varint(len(body)) + body"
+    }
+}
+
+/// 長さ付きバイト列のパラメータの値がエンコード済みであることを検証する。
+///
+/// フィルタ本体 (`LocationFilter.encode` や `MessageParameters.location_filter` が
+/// 返す長さプレフィックスを持たないバイト列) を渡された場合に、黙って別の値として
+/// 解釈しないよう長さを照合する。
+fn validate_encoded_value(param_type: u64, value: &[u8]) -> PyResult<()> {
+    if !is_length_prefixed(param_type) {
+        return Ok(());
+    }
+    let Some((declared, prefix_len)) = decode_varint_prefix(value).map_err(codec_error)? else {
+        return Err(PyValueError::new_err(format!(
+            "message parameter {param_type:#x} requires an encoded value with a length prefix, got {} bytes; {}",
+            value.len(),
+            encoded_value_hint(param_type)
+        )));
+    };
+    let remaining = (value.len() - prefix_len) as u64;
+    if declared != remaining {
+        return Err(PyValueError::new_err(format!(
+            "message parameter {param_type:#x} requires an encoded value: the length prefix declares {declared} bytes but {remaining} bytes follow"
+        )));
+    }
+    Ok(())
+}
+
+/// Python 側の値 1 件をパラメータへ変換する。
+///
+/// `Event.parameters` / `Message.parameters` / `MessageParameters.to_dict()` が返す
+/// 「型番号をキーにしたエンコード済みバイト列の辞書」の値と同じ形式を第一に受け付ける。
+/// `bytes` は長さ付きバイト列の型では長さプレフィックスを含むエンコード済みの値として
+/// 解釈し、宣言長と実際の長さが一致しない場合は `ValueError` にする。
+///
+/// `bytes` 以外は型ごとの Python 表現として解釈する。`uint8` と `vi64` は `int`、
+/// `LARGEST_OBJECT` は `(group_id, object_id)`、`TRACK_NAMESPACE_PREFIX` は `bytes` の
+/// リスト、`FILL_PARAMETERS` は入れ子の辞書、`AUTHORIZATION_TOKEN` は `{"kind": ...}`
+/// の辞書または `(token_type, token_value)` のタプル、`LOCATION_FILTER` は
+/// `LocationFilter` である。
+pub(crate) fn parameter_from_python(
+    param_type: u64,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<MessageParameter> {
+    // 型付きのフィルタは長さプレフィックスを持たないため、バイト列より先に受け付ける
+    if param_type == PARAM_LOCATION_FILTER
+        && let Ok(filter) = value.cast::<LocationFilter>()
+    {
+        return Ok(MessageParameter {
+            param_type,
+            value: MessageParameterValue::LengthPrefixed(filter.borrow().body_bytes()),
+        });
+    }
+    // エンコード済みバイト列 (受信側が返す辞書の値と同じ形式) として解釈する
+    if let Ok(encoded) = value.cast::<PyBytes>() {
+        validate_encoded_value(param_type, encoded.as_bytes())?;
+        return decode_parameter_entry(param_type, encoded.as_bytes());
+    }
+    Ok(MessageParameter {
+        param_type,
+        value: typed_parameter_value_from_python(param_type, value)?,
+    })
+}
+
+/// パラメータ型に応じて Python 側の型付きの値をライブラリの型へ変換する。
+fn typed_parameter_value_from_python(
     param_type: u64,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<MessageParameterValue> {
@@ -207,15 +296,18 @@ pub(crate) fn parameter_value_from_python(
         | PARAM_SUBSCRIBER_PRIORITY
         | PARAM_GROUP_ORDER
         | PARAM_INCLUDE_PROPERTIES => Ok(MessageParameterValue::Uint8(value.extract::<u8>()?)),
-        // Length-prefixed バイト列で表現するパラメータ
+        // 長さ付きバイト列で表現するフィルタは、エンコード済みバイト列か
+        // LOCATION_FILTER の型付き表現だけを受け付ける。エンコード済みバイト列は
+        // 呼び出し元の `parameter_from_python` が処理済みである
         PARAM_LOCATION_FILTER
         | PARAM_SUBGROUP_FILTER
         | PARAM_OBJECTID_FILTER
         | PARAM_PRIORITY_FILTER
         | PARAM_OBJECT_PROPERTY_FILTER
-        | PARAM_TRACK_PROPERTY_FILTER => Ok(MessageParameterValue::LengthPrefixed(
-            value.extract::<Vec<u8>>()?,
-        )),
+        | PARAM_TRACK_PROPERTY_FILTER => Err(PyValueError::new_err(format!(
+            "message parameter {param_type:#x} requires an encoded value with a length prefix, got {}",
+            value.get_type().name()?
+        ))),
         // Track Namespace で表現するパラメータ
         PARAM_TRACK_NAMESPACE_PREFIX => Ok(MessageParameterValue::TrackNamespacePrefix(
             track_namespace_from_python(value.extract::<Vec<Vec<u8>>>()?)?,
@@ -242,8 +334,10 @@ pub(crate) fn parameter_value_from_python(
 
 /// Python 側の辞書から `MessageParameters` を構築する。
 ///
-/// キーはパラメータ型、値は型ごとの表現である。AUTHORIZATION_TOKEN は複数回
-/// 指定できるため、値にリストを渡した場合は同じ型を複数回追加する。
+/// キーはパラメータ型、値は `Event.parameters` / `Message.parameters` /
+/// `MessageParameters.to_dict()` と同じ「パラメータ 1 件分のエンコード済みバイト列」、
+/// または型ごとの Python 表現である。AUTHORIZATION_TOKEN は複数回指定できるため、
+/// 値にリストを渡した場合は同じ型を複数回追加する。
 pub(crate) fn message_parameters_from_python(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<MessageParameters> {
@@ -256,18 +350,12 @@ pub(crate) fn message_parameters_from_python(
             && let Ok(tokens) = item.cast::<PyList>()
         {
             for token in tokens.iter() {
-                parameters.push(MessageParameter {
-                    param_type,
-                    value: parameter_value_from_python(param_type, &token)?,
-                });
+                parameters.push(parameter_from_python(param_type, &token)?);
             }
             continue;
         }
 
-        parameters.push(MessageParameter {
-            param_type,
-            value: parameter_value_from_python(param_type, &item)?,
-        });
+        parameters.push(parameter_from_python(param_type, &item)?);
     }
     Ok(parameters)
 }

@@ -9,9 +9,11 @@ WebTransport を介した client / server は `moqt.moq` が提供する。
 バイト列を検査するテストから使う。
 
 `Event.parameters` と `Message.parameters` はパラメータを「型番号をキーにした
-エンコード済みバイト列の辞書」として返す。draft が定める値の型と意味で読み書きする
-場合は `MessageParameters` を使う。`LocationFilter` は `LOCATION_FILTER` の
-型付き表現である。
+エンコード済みバイト列の辞書」として返す。同じ形式の辞書が `Session.send_*` と
+`moqt.moq` の `parameters` 引数に対する入力であり、受信した辞書をそのまま送信経路へ
+渡せる。draft が定める値の型と意味で読み書きする場合は `MessageParameters` を使う。
+`LocationFilter` は `LOCATION_FILTER` の型付き表現であり、辞書の値としてそのまま
+渡せる。
 
 MoQT は draft 由来であり、将来の改訂で変更される可能性がある。
 """

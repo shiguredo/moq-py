@@ -103,19 +103,24 @@ def _range_filter(
     end: int,
     property_type: int | None = None,
 ) -> bytes:
-    """Range Filter 1 個分のバイト列を作る。
+    """Range Filter 1 個分のパラメータ値を作る。
 
+    フィルタ本体は
     `SetID (8 bits) | [Property Type (vi64)] | Start Delta (vi64) | End Delta (vi64)`
     の形である。Property Type を持つのは OBJECT_PROPERTY_FILTER と
     TRACK_PROPERTY_FILTER だけである
     (draft-ietf-moq-transport-21 §3.3.2 (Range Filters))。
+
+    パラメータの値は長さプレフィックスを含むエンコード済みの形なので、本体の前に
+    Length (vi64) を付けて返す
+    (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))。
     """
-    data = bytes([set_id])
+    body = bytes([set_id])
     if property_type is not None:
-        data += moqt.encode_varint(property_type)
-    data += moqt.encode_varint(start)
-    data += moqt.encode_varint(end - start)
-    return data
+        body += moqt.encode_varint(property_type)
+    body += moqt.encode_varint(start)
+    body += moqt.encode_varint(end - start)
+    return moqt.encode_varint(len(body)) + body
 
 
 def _object_properties(timestamp: int) -> bytes:
