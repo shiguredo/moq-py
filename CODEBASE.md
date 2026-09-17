@@ -4,8 +4,6 @@
 
 以下は指示が取り消されるまでの一時的な運用である。
 
-- GitHub Actions は対応しないこと
-  - `.github/workflows/` の追加・変更・修正を行わないこと
 - 変更履歴を `CHANGES.md` に残さないこと
   - `CHANGES.md` を新規作成しないこと
 - Pull-Request とブランチを作らないこと
