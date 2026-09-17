@@ -1,7 +1,7 @@
 # moqt-rs の develop 追従で delta 更新の失敗時の意味論が変わる
 
 - Created: 2026-09-18
-- Completed:
+- Completed: 2026-09-18
 
 ## 目的
 
@@ -41,3 +41,18 @@ moqt-rs の新しい挙動 (原子的) を正とし、doc とテストをそれ�
 - `cargo test` が通ること
 - `cargo fmt` / `cargo clippy` / `ruff` が通ること
 - `python/moqt/_native.pyi` がビルドから再生成した内容と一致すること
+
+## 解決方法
+
+`Cargo.lock` の `shiguredo_moqt` を `424d1a5` へ更新した。
+
+- `src/msf.rs` の `Catalog::apply_delta` の doc を「適用は原子的であり、途中で失敗した
+  場合は `ValueError` を送出してこのカタログを呼び出し前の状態に保つ」に改めた
+- `tests/test_msf.py` の
+  `test_catalog_apply_delta_leaves_earlier_operations_applied_on_failure` を
+  `test_catalog_apply_delta_is_atomic_on_failure` に改名し、失敗した呼び出しが
+  1 件目の add ごと取り消すことを検証するようにした
+- `python/moqt/_native.pyi` を `uv run maturin develop --generate-stubs` で再生成した
+
+`uv run pytest` は 328 件すべて通り、`cargo test` / `cargo fmt` / `cargo clippy` /
+`ruff` も通ることを確認した。
