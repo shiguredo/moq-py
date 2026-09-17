@@ -3,10 +3,12 @@
 # - prek ジョブ: prek.toml のフックを pre-commit と pre-push の両ステージで実行する。
 #   pre-push のフック (pytest / cargo test) は既定のステージでは実行されないため、
 #   prek-action をステージごとに 2 回呼び分ける
-# - runner: OS と CPU アーキテクチャの組み合わせ 3 つに同じフックを回し、環境ごとの差
+# - runner: OS と CPU アーキテクチャの組み合わせ 5 つに同じフックを回し、環境ごとの差
 #   (PyO3 拡張のビルド、QUIC の実通信テスト) を検出する
 #   - ubuntu-slim は Rust が入っておらず、moqt-py は PyO3 拡張のビルドに cargo を
 #     要するため使わない
+#   - ubuntu-24.04 系を残すのは、webtransport-py の Linux wheel が manylinux_2_39
+#     (glibc 2.39) であり、対応する最古の LTS が 24.04 であるため
 #   - macos-15 は入れない。webtransport-py の macOS wheel は macosx_26_0_arm64 だけで
 #     sdist も無く、macOS 15 では互換 wheel が見つからず uv sync が失敗する。
 #     webtransport-py が macOS 15 向けの wheel か sdist を用意したら追加する
@@ -35,6 +37,8 @@ jobs:
         runner:
           - ubuntu-26.04
           - ubuntu-26.04-arm
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
           - macos-26
     runs-on: ${{ matrix.runner }}
     # prek の hook 環境準備 (初回や cache miss)、Python のダウンロード、PyO3 拡張の
