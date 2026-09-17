@@ -211,12 +211,13 @@ def test_catalog_apply_delta_reports_a_track_that_cannot_be_resolved() -> None:
         catalog.apply_delta(remove)
 
 
-def test_catalog_apply_delta_leaves_earlier_operations_applied_on_failure() -> None:
+def test_catalog_apply_delta_is_atomic_on_failure() -> None:
     """
-    delta 更新が途中で失敗しても先行する操作が取り消されないことを確認する。
+    delta 更新が途中で失敗した場合にカタログが適用前の状態へ保たれることを確認する。
 
-    draft-ietf-moq-msf-01 §5.1.6 (Delta update) の操作は逐次適用され、
-    ロールバックは規定されていない。適用前の状態を保ちたい場合の判断材料になる。
+    draft-ietf-moq-msf-01 §5.1.6 (Delta update) の操作は逐次適用されるが、
+    moqt-rs は複製へ適用して成功時のみ差し替えるため、失敗した呼び出しは
+    カタログを変更しない。
     """
     catalog = Catalog.parse(MINIMAL_CATALOG)
     # 1 件目の add は成功し、2 件目の remove は存在しないトラックを指す
@@ -229,7 +230,8 @@ def test_catalog_apply_delta_leaves_earlier_operations_applied_on_failure() -> N
     with pytest.raises(ValueError, match="delta remove: track 'missing' not found"):
         catalog.apply_delta(delta)
 
-    assert [track["name"] for track in catalog.tracks] == ["video"]
+    # 失敗した呼び出しは 1 件目の add ごと取り消し、カタログを変更しない
+    assert [track["name"] for track in catalog.tracks] == []
 
 
 def test_delta_update_reads_its_operations() -> None:

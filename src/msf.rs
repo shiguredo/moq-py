@@ -143,9 +143,9 @@ impl Catalog {
     /// `namespace` はカタログトラック自身のネームスペースであり、トラックが
     /// namespace を省略した場合の継承先として使う (draft-ietf-moq-msf-01 §5.2.2)。
     ///
-    /// 操作は配列順に適用される。途中で失敗した場合、それまでの操作は取り消されない
-    /// (draft-ietf-moq-msf-01 §5.1.6)。差し替え前の状態を保ちたい場合は、適用前に
-    /// 呼び出し側でカタログを複製すること。
+    /// 操作は配列順に適用される。適用は原子的であり、途中で失敗した場合は
+    /// `ValueError` を送出してこのカタログを呼び出し前の状態に保つ
+    /// (draft-ietf-moq-msf-01 §5.1.6)。
     #[pyo3(signature = (text, namespace = None))]
     fn apply_delta(&mut self, text: &str, namespace: Option<&str>) -> PyResult<()> {
         let delta = match MsfCatalogDocument::decode(text.as_bytes()).map_err(codec_error)? {
