@@ -1838,6 +1838,14 @@ class Session:
         peer へ確実に届ける (draft-ietf-moq-transport-21 §11.3.2 (Subgroup Object))。
         省略した場合は RESET_STREAM になり、未達のデータは破棄される。
         """
+    def retry_pending_data_streams(self, /) -> list[Event]:
+        """
+        購読が確定する前に届いたデータストリームを再試行する。
+        
+        ヘッダを受理できずに保留したストリームを購読の確定後に回し直し、発生した
+        イベントを返す。購読を登録した直後と定期処理から呼ぶ。保留がなければ
+        空のリストを返す。
+        """
     def role(self, /) -> str:
         """
         自側の役割を返す。

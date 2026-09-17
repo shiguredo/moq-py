@@ -2290,6 +2290,7 @@ def _received_subgroup_stream(
     *,
     subgroup_id_mode: int,
     subgroup_id: int | None = None,
+    group_id: int = 7,
 ) -> bytes:
     """受信側へ流し込む subgroup ストリームのバイト列を組み立てる。
 
@@ -2303,7 +2304,7 @@ def _received_subgroup_stream(
     data = bytearray()
     data += encode_varint(type_byte)
     data += encode_varint(1)
-    data += encode_varint(7)
+    data += encode_varint(group_id)
     if subgroup_id is not None:
         data += encode_varint(subgroup_id)
     # 最初の Object の Object ID Delta は Object ID そのものである
@@ -2383,6 +2384,165 @@ def test_received_subgroup_reports_an_explicit_subgroup_id_from_the_header() -> 
     accepted = [event for event in events if event.kind == "object"]
     assert len(accepted) == 1
     assert accepted[0].subgroup_id == 3
+
+
+def test_received_subgroup_before_subscribe_ok_is_delivered_after_acceptance() -> None:
+    """
+    購読が確定する前に届いた subgroup が購読の確定後に配信されることを確認する。
+
+    SUBSCRIBE_OK は bidi ストリーム、subgroup は uni ストリームで届くため、
+    subscriber が SUBSCRIBE_OK を処理するより先にオブジェクトを処理することがある。
+    この並び順でもセッションを落とさず、購読の確定後にオブジェクトを配信する
+    (draft-ietf-moq-transport-21 §3.1.2 (Track Alias))。
+    """
+    client, server = _setup()
+    events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    subscribe_ok = server.send_subscribe_ok(request_id, 1, {}, {})
+
+    # SUBSCRIBE_OK を渡す前にヘッダと Object を 1 度に投入する
+    stream = _received_subgroup_stream(0, b"early", subgroup_id_mode=0x00)
+    objects, events = client.receive_data_stream(2, stream, 0x10)
+
+    # 購読が確定していないため状態機械へは渡さず、保留する
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+    assert client.state() == "established"
+
+    # SUBSCRIBE_OK を処理してから再試行すると配信される
+    client.receive_request_stream(4, _message_data(subscribe_ok[0]), "local")
+    retried = client.retry_pending_data_streams()
+
+    accepted = [event for event in retried if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].object_id == 0
+    assert accepted[0].data == b"early"
+    assert accepted[0].group_id == 7
+    assert accepted[0].acceptance == "accepted"
+
+
+def test_received_subgroup_before_subscribe_ok_survives_fragmentation() -> None:
+    """
+    購読が確定する前の subgroup が断片に分かれていても配信されることを確認する。
+
+    ヘッダと Object が別の断片で届くと、ヘッダを受理できないまま Object の断片だけが
+    届く。この場合もセッションを落とさず、購読の確定後にオブジェクトを配信する。
+    """
+    client, server = _setup()
+    events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    subscribe_ok = server.send_subscribe_ok(request_id, 1, {}, {})
+
+    # ヘッダと Object を別々の断片で投入する
+    header = encode_varint(0x30) + encode_varint(1) + encode_varint(7)
+    payload = b"split"
+    object_data = encode_varint(0) + encode_varint(len(payload)) + payload
+
+    objects, events = client.receive_data_stream(2, header, 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+
+    objects, events = client.receive_data_stream(2, object_data, None)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+    assert client.state() == "established"
+
+    # 購読の確定後に再試行すると、分割されていてもオブジェクトが配信される
+    client.receive_request_stream(4, _message_data(subscribe_ok[0]), "local")
+    retried = client.retry_pending_data_streams()
+
+    accepted = [event for event in retried if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].data == payload
+
+
+def test_received_subgroup_for_an_unknown_alias_does_not_close_the_session() -> None:
+    """
+    購読に紐づかない subgroup が保留の上限を超えたら捨てられることを確認する。
+
+    購読が成立しないまま未知の Track Alias のストリームが届き続けても、
+    受信経路が例外を送出せずセッションが継続することを確認する。
+    """
+    client, server = _setup()
+    # server は track alias 2 で購読を確立する
+    _subscribe_round_trip(client, server, 4, track_alias=2)
+
+    # 購読していない track alias 1 のストリームを上限まで肥大させる
+    oversized = b"\x00" * (128 * 1024 + 1)
+    client.receive_data_stream(7, oversized, 0x10)
+
+    # 以後の断片は読み捨てられ、セッションも例外も発生しない
+    objects, events = client.receive_data_stream(7, b"\x00", 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+    assert client.state() == "established"
+
+
+def test_received_subgroup_filtered_out_is_ignored_without_closing_the_session() -> None:
+    """
+    フィルタで落ちた subgroup を例外なしに読み捨てることを確認する。
+
+    購読が確定していても、Location Filter を通らない Group のストリームは
+    `FilteredOut` になる。再試行しても結果は変わらないため、このストリームは
+    以後読み捨て、セッションを落とさない
+    (draft-ietf-moq-transport-21 §3.1 (Subscriptions) のフィルタ再適用)。
+    """
+    client, server = _setup()
+    # Group 9 以降だけを購読する Location Filter
+    absolute = LocationFilter("absolute_start", start_group=9, start_object=0)
+    events = client.send_subscribe([b"ns"], b"t", {moqt.PARAM_LOCATION_FILTER: absolute.encode()})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    # フィルタの判定は状態機械が行うため、応答の内容は使わない
+    server.send_subscribe_ok(request_id, 1, {}, {})
+
+    # フィルタを通らない Group 7 のストリームを投入する
+    stream = _received_subgroup_stream(0, b"filtered", subgroup_id_mode=0x00, group_id=7)
+    objects, events = client.receive_data_stream(5, stream, 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+    assert client.state() == "established"
+
+    # 同じストリームへ続きを投入しても例外にならない
+    objects, events = client.receive_data_stream(5, b"", 0x10)
+    assert objects == []
+    assert [event for event in events if event.kind == "object"] == []
+    assert client.state() == "established"
+
+
+def test_received_datagram_before_subscribe_ok_is_delivered_after_acceptance() -> None:
+    """
+    購読が確定する前に届いたデータグラムが購読の確定後に受理されることを確認する。
+
+    データグラムにも SUBSCRIBE_OK の処理順の逆転がありうる。購読が確定していない
+    間は `unknown_track_alias` を返して破棄し、購読の確定後に届いた同じデータグラムは
+    オブジェクトとして受理する (draft-ietf-moq-transport-21 §11.2 (Datagrams))。
+    """
+    client, server = _setup()
+    events = client.send_subscribe([b"ns"], b"t", {})
+    request_id = _request_id(events[0])
+    client.register_local_request_stream(4, request_id)
+    server.receive_request_stream(4, _message_data(events[0]), "peer")
+    subscribe_ok = server.send_subscribe_ok(request_id, 1, {}, {})
+
+    datagram = _object_datagram(1, 7, 0, b"early", None)
+
+    # 購読が確定していない間は受理されず、破棄される
+    events = client.receive_datagram(datagram)
+    assert [event.kind for event in events] == ["unknown_track_alias"]
+
+    # 購読の確定後は同じデータグラムがオブジェクトとして受理される
+    client.receive_request_stream(4, _message_data(subscribe_ok[0]), "local")
+    events = client.receive_datagram(datagram)
+
+    accepted = [event for event in events if event.kind == "object"]
+    assert len(accepted) == 1
+    assert accepted[0].data == b"early"
 
 
 def test_send_subgroup_header_uses_the_first_object_id_mode() -> None:

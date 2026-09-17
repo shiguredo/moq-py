@@ -16,6 +16,7 @@
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -152,6 +153,19 @@ DEFAULT_SUBSCRIBER_PRIORITY = moqt.DEFAULT_SUBSCRIBER_PRIORITY
 
 # セッションのタイムアウト判定間隔 (秒)
 TICK_INTERVAL = 0.1
+
+# 購読が確定していない Track Alias 宛てに保持するデータグラムの件数の上限。
+#
+# 状態機械が SUBSCRIBE_OK を処理して購読を登録するまでの間だけ保持すればよいため、
+# 通常は数件に収まる。上限に達するのは、購読が成立しないまま未知の Track Alias の
+# データグラムが届き続けている場合だけである。
+MAX_PENDING_DATAGRAMS = 256
+
+# 保持したデータグラムの再試行の上限回数。
+#
+# 定期処理の間隔 (TICK_INTERVAL) だけ待っても購読が確定しないデータグラムは、
+# 購読が成立しないまま届いたものである。保持し続けずに破棄する。
+MAX_DATAGRAM_RETRY_ATTEMPTS = 64
 
 # Subgroup Header の SUBGROUP_ID_MODE (draft-ietf-moq-transport-21 §11.3.1)。
 # `ZERO` は Subgroup ID を 0 に固定し、`FIRST_OBJECT_ID` は最初の Object ID を
@@ -390,6 +404,8 @@ class Runtime:
         self._subgroups: dict[int, SubgroupWriter] = {}
         # 自側が開いた fetch stream の送信状態 (stream ID 索引)
         self._fetch_streams: dict[int, FetchWriter] = {}
+        # 購読が確定していない Track Alias 宛てのデータグラムと、その再試行回数
+        self._pending_datagrams: deque[tuple[bytes, int]] = deque()
         self._closed = False
 
     # ─── 状態 ───────────────────────────────────────────────
@@ -590,6 +606,8 @@ class Runtime:
         if self._closed:
             return
         self._closed = True
+        # セッションが終了すると購読が確定することはないため、保持を捨てる
+        self._pending_datagrams.clear()
         with contextlib.suppress(Exception):
             await self._apply_events(self._core.close(code, reason))
         await self._ops.close(code, reason)
@@ -658,9 +676,66 @@ class Runtime:
             logger.debug("MoQT stream close was rejected: stream=%s error=%s", stream_id, error)
             await self._finish_session(0, str(error))
 
+    async def retry_pending_data_streams(self) -> None:
+        """購読が確定する前に届いたデータストリームを再試行する。
+
+        状態機械が Track Alias を購読へ紐づけられるようになった直後に呼ぶ。
+        """
+        await self._apply_events(self._core.retry_pending_data_streams())
+
     async def receive_datagram(self, data: bytes) -> None:
-        """WebTransport のデータグラムを状態機械へ渡す。"""
-        await self._apply_events(self._core.receive_datagram(data))
+        """WebTransport のデータグラムを状態機械へ渡す。
+
+        購読がまだ確定していない Track Alias 宛てのデータグラムは、状態機械が
+        `unknown_track_alias` を返す。この場合は購読が確定したあとに再試行できるよう
+        生バイト列を保持する。データグラムには購読の登録に相当する明示的な契機が
+        無いため、再試行は定期処理から行う。
+        """
+        events = self._core.receive_datagram(data)
+        if any(event.kind == "unknown_track_alias" for event in events):
+            self._hold_datagram(data)
+            return
+        await self._apply_events(events)
+
+    def _hold_datagram(self, data: bytes) -> None:
+        """購読が未確定の Track Alias 宛てのデータグラムを保持する。
+
+        保持する件数には上限を設ける。上限に達するのは、購読が成立しないまま
+        データグラムが届き続けている場合だけである。
+        """
+        if len(self._pending_datagrams) >= MAX_PENDING_DATAGRAMS:
+            logger.warning(
+                "MoQT dropped a datagram: %d datagrams are already held "
+                "and no subscription matches their track alias",
+                MAX_PENDING_DATAGRAMS,
+            )
+            return
+        self._pending_datagrams.append((data, 0))
+
+    async def retry_pending_datagrams(self) -> None:
+        """保持したデータグラムを購読の確定後に再試行する。
+
+        1 回の呼び出しで保持している各データグラムを 1 回だけ試す。まだ購読が
+        確定していないものは到着順を保ったまま保持し直す。
+        """
+        if self._closed or not self._pending_datagrams:
+            return
+        # 再試行の対象は呼び出し時点で保持しているものだけにする。失敗したものを
+        # 末尾へ戻すため、件数を先に固定する
+        for _ in range(len(self._pending_datagrams)):
+            data, attempts = self._pending_datagrams.popleft()
+            events = self._core.receive_datagram(data)
+            if any(event.kind == "unknown_track_alias" for event in events):
+                if attempts + 1 >= MAX_DATAGRAM_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "MoQT dropped a datagram after %d retries: "
+                        "no subscription matches its track alias",
+                        attempts + 1,
+                    )
+                    continue
+                self._pending_datagrams.append((data, attempts + 1))
+                continue
+            await self._apply_events(events)
 
     # ─── 定期処理 ───────────────────────────────────────────
 
@@ -674,6 +749,10 @@ class Runtime:
             return
         now_ms = int(asyncio.get_running_loop().time() * 1000)
         await self._apply_events(self._core.tick(now_ms))
+        # 購読が確定する前に届いたデータを再試行する。購読の登録直後の再試行で
+        # 拾えなかった分の受け皿であり、データグラムはここでだけ再試行する
+        await self._apply_events(self._core.retry_pending_data_streams())
+        await self.retry_pending_datagrams()
         self.cleanup_terminated_requests()
 
     # ─── 要求 ───────────────────────────────────────────────
@@ -1585,6 +1664,8 @@ class Runtime:
         if self._closed:
             return
         self._closed = True
+        # セッションが終了すると購読が確定することはないため、保持を捨てる
+        self._pending_datagrams.clear()
         for pending in self._pending_requests.values():
             if not pending.future.done():
                 pending.future.set_exception(SessionClosedError(code, reason))

@@ -66,6 +66,15 @@ use shiguredo_moqt::varint;
 /// 上限を超えるのは peer が壊れたストリームを送り続けている場合に限られる。
 const MAX_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 
+/// 購読が確定していないために保留するデータストリームの本数の上限。
+///
+/// 保留するのは、状態機械が Track Alias を購読へ紐づけられるようになるまでの間だけ
+/// である。上限に達するのは、購読が成立しないまま未知の Track Alias のストリームが
+/// 届き続けている場合だけである。上限を超えたら保留をすべて捨て、以後のデータは
+/// 状態機械へ渡さない。ストリームごとの保持バイト列は `MAX_STREAM_BUFFER_BYTES` が
+/// 制限する。
+const MAX_PENDING_DATA_STREAMS: usize = 256;
+
 // Subgroup ID のエンコードモード (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
 //
 // SUBGROUP_ID_MODE は Type Flags の bits 1-2 (mask 0x06) の 2 bit である。Python からは
@@ -145,6 +154,14 @@ impl StreamBuffers {
         }
         buffer.extend_from_slice(data);
         Ok(())
+    }
+
+    /// 断片を追加しても上限を超えないかを返す。
+    ///
+    /// 上限を超えるストリームは購読と無関係であるため、例外ではなく破棄で扱う。
+    fn fits(&self, stream_id: u64, data: &[u8]) -> bool {
+        let current = self.buffers.get(&stream_id).map_or(0, Vec::len);
+        current.saturating_add(data.len()) <= MAX_STREAM_BUFFER_BYTES
     }
 
     /// バッファへの参照を返す。
@@ -521,6 +538,38 @@ fn termination_reason_to_python(
         }
     }
     Ok(dict.unbind())
+}
+
+/// 保留したデータストリームを購読の確定後に再試行する。
+///
+/// 保留したストリームがなければ何もしない。購読が確定していれば状態機械がヘッダを
+/// 受理し、保持していたオブジェクトがイベントとして返る。受信バイト列は
+/// `data_buffers` にあるため、デコーダを捨てれば受信経路が作り直す。
+fn retry_held_data_streams(session: &mut CoreSession, py: Python<'_>) -> PyResult<Vec<CoreEvent>> {
+    if session.pending_data_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
+    for stream_id in session
+        .pending_data_streams
+        .iter()
+        .copied()
+        .collect::<Vec<_>>()
+    {
+        // 保留を解除してから回し直す。購読が確定していれば受理され、確定して
+        // いなければ `hold_data_stream` が保留し直す
+        session.pending_data_streams.remove(&stream_id);
+        session.data_decoders.remove(&stream_id);
+        let Some(stream_type) = session.data_stream_types.get(&stream_id).copied() else {
+            // 種別を通知していないストリームは保留の対象にならない
+            continue;
+        };
+        // 受信バイト列は `data_buffers` にあるため、デコーダを捨てれば作り直せる
+        let (_objects, mut stream_events) =
+            session.receive_buffered_data_stream(py, stream_id, stream_type)?;
+        events.append(&mut stream_events);
+    }
+    Ok(events)
 }
 
 /// `TrackDataAcceptance` を Python 側の文字列へ変換する。
@@ -1458,6 +1507,10 @@ pub(crate) struct CoreSession {
     data_stream_types: HashMap<u64, DataStreamType>,
     /// ヘッダをデコード済みのデータストリーム。
     data_headers_decoded: HashSet<u64>,
+    /// 購読が確定していないために保留しているデータストリーム。
+    pending_data_streams: HashSet<u64>,
+    /// 購読と無関係な Track Alias 宛てのデータで以後無視するデータストリーム。
+    ignored_data_streams: HashSet<u64>,
     started: bool,
     established: bool,
 }
@@ -1526,6 +1579,8 @@ impl CoreSession {
             last_error: None,
             data_stream_types: HashMap::new(),
             data_headers_decoded: HashSet::new(),
+            pending_data_streams: HashSet::new(),
+            ignored_data_streams: HashSet::new(),
             started: false,
             established: false,
         })
@@ -1628,6 +1683,301 @@ impl CoreSession {
             Some(DataStreamDecoder::Fetch(decoder)) => decoder.finish().is_err(),
             Some(DataStreamDecoder::Padding) | None => false,
         }
+    }
+
+    /// ヘッダを受理できなかった subgroup ストリームを保留する。
+    ///
+    /// デコーダを破棄して受信バイト列を `data_buffers` に残す。購読が確定したあとに
+    /// `retry_held_data_streams` が保持したバイト列からデコーダを作り直して回す。
+    /// 保留の本数が上限を超えたら、保留していたストリームをすべて捨てて以後のデータを
+    /// 状態機械へ渡さない。
+    fn hold_data_stream(&mut self, stream_id: u64) {
+        if self.pending_data_streams.len() >= MAX_PENDING_DATA_STREAMS
+            && !self.pending_data_streams.contains(&stream_id)
+        {
+            for held in std::mem::take(&mut self.pending_data_streams) {
+                self.ignore_data_stream(held);
+            }
+        }
+        self.data_decoders.remove(&stream_id);
+        self.pending_data_streams.insert(stream_id);
+    }
+
+    /// 状態機械へ渡さないと確定したストリームを登録する。
+    ///
+    /// デコーダと受信バイト列を捨て、以降のバイト列は受信経路が読み捨てる。
+    /// 保持し続けると `MAX_STREAM_BUFFER_BYTES` に達して受信経路が失敗するため、
+    /// 購読と無関係なストリームは早い段階で切り離す。
+    fn ignore_data_stream(&mut self, stream_id: u64) {
+        self.data_decoders.remove(&stream_id);
+        self.data_buffers.remove(stream_id);
+        self.pending_data_streams.remove(&stream_id);
+        self.ignored_data_streams.insert(stream_id);
+    }
+
+    /// データストリームの種別に応じてデコーダを回す。
+    ///
+    /// ヘッダを受理できなかった subgroup ストリームは保留として扱い、`data_buffers` の
+    /// バイト列を残したままにする。保留したストリームの再試行と通常の受信
+    /// (`receive_data_stream`) の共通経路である。
+    fn receive_buffered_data_stream(
+        &mut self,
+        py: Python<'_>,
+        stream_id: u64,
+        stream_type: DataStreamType,
+    ) -> PyResult<(Vec<DecodedObjectInfo>, Vec<CoreEvent>)> {
+        // 購読に紐づかないと確定したストリームは、以後バイト列を読み捨てる
+        // (draft-ietf-moq-transport-21 §3.1 (Subscriptions) のフィルタ再適用の結果)。
+        if self.ignored_data_streams.contains(&stream_id) {
+            self.data_buffers.remove(stream_id);
+            return Ok((Vec::new(), self.drain_events(py)?));
+        }
+
+        // 種別ごとのデコーダを用意する。fetch ストリームは Request ID を運ぶ
+        // FETCH_HEADER が揃うまで作らない
+        if !self.data_decoders.contains_key(&stream_id) {
+            let buffered = self.data_buffers.get(stream_id).to_vec();
+            let Some(decoder) = self.create_data_decoder(stream_type, &buffered)? else {
+                // ヘッダの続きを待つ。断片はバッファへ保持したままにする
+                return Ok((Vec::new(), self.drain_events(py)?));
+            };
+            self.data_decoders.insert(stream_id, decoder);
+        }
+
+        let buffered = self.data_buffers.get(stream_id).to_vec();
+        self.data_buffers.remove(stream_id);
+
+        let mut objects = Vec::new();
+        let mut events = Vec::new();
+        let stream = DataStreamId(stream_id);
+        match self.data_decoders.get_mut(&stream_id) {
+            Some(DataStreamDecoder::Subgroup(decoder)) => {
+                decoder.push(&buffered);
+                if !self.data_headers_decoded.contains(&stream_id)
+                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
+                {
+                    // ヘッダを状態機械が受理したかを確かめる。購読がまだ確定して
+                    // いなければデコーダを破棄し、受信バイト列を保持したまま保留する。
+                    // 保留したストリームは購読の確定後に回し直す
+                    // (draft-ietf-moq-transport-21 §3.1.2 (Track Alias) は、購読が
+                    // 確定する前に届いたオブジェクトを未知の Track Alias として
+                    // 破棄することを要求していない)。
+                    let acceptance = self
+                        .session
+                        .recv_subgroup_header(stream, &header)
+                        .map_err(runtime_error)?;
+                    match acceptance {
+                        TrackDataAcceptance::Accepted => {}
+                        TrackDataAcceptance::UnknownTrackAlias => {
+                            // デコーダが受け取ったバイト列を保持し直してから破棄する。
+                            // 再試行はこのバイト列からデコーダを作り直して回す
+                            self.data_buffers.push(stream_id, &buffered)?;
+                            self.hold_data_stream(stream_id);
+                            events.extend(self.drain_events(py)?);
+                            return Ok((objects, events));
+                        }
+                        TrackDataAcceptance::FilteredOut => {
+                            // 購読は確定しているがフィルタで落ちている。再試行しても
+                            // 結果は変わらないため、このストリームは以後読み捨てる
+                            self.ignore_data_stream(stream_id);
+                            events.extend(self.drain_events(py)?);
+                            return Ok((objects, events));
+                        }
+                        TrackDataAcceptance::Discarded => {
+                            // 状態機械が破棄対象として登録済みであり、以降の
+                            // オブジェクトは `recv_subgroup_object` が破棄として
+                            // 吸収する。そのまま渡す
+                        }
+                    }
+                    // Subgroup ID を持たないモードではヘッダからは決まらない。Zero は 0、
+                    // FirstObjectId は最初のオブジェクト ID になるため、ここでは `None`
+                    // としてアプリへ渡す
+                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+                    let subgroup_id = match header.subgroup_id {
+                        SubgroupIdMode::Zero => Some(0),
+                        SubgroupIdMode::Explicit(id) => Some(id),
+                        SubgroupIdMode::FirstObjectId => None,
+                    };
+                    self.data_headers.insert(
+                        stream_id,
+                        DataHeaderInfo {
+                            track_alias: header.track_alias,
+                            group_id: header.group_id,
+                            publisher_priority: header.publisher_priority,
+                            subgroup_id,
+                        },
+                    );
+                    self.data_headers_decoded.insert(stream_id);
+                }
+                // ヘッダが揃うまでオブジェクトはデコードできない
+                if !self.data_headers_decoded.contains(&stream_id) {
+                    events.extend(self.drain_events(py)?);
+                    return Ok((objects, events));
+                }
+                loop {
+                    // ペイロードの到着を待っているオブジェクトを先に処理する。
+                    // デコーダがペイロード消費待ちの間は次のオブジェクトを読めない
+                    let object = match self.pending_subgroup_objects.remove(&stream_id) {
+                        Some(object) => object,
+                        None => match decoder.try_decode_object().map_err(runtime_error)? {
+                            Some(object) => object,
+                            None => break,
+                        },
+                    };
+                    // ペイロードが揃っていない場合は保留して続きの到着を待つ。
+                    // payload_length が 0 のオブジェクトはデコーダにペイロードが無い
+                    let payload = if object.payload_length == 0 {
+                        Vec::new()
+                    } else {
+                        match decoder.try_read_payload() {
+                            Some(payload) => payload,
+                            None => {
+                                self.pending_subgroup_objects.insert(stream_id, object);
+                                break;
+                            }
+                        }
+                    };
+                    let acceptance = self
+                        .session
+                        .recv_subgroup_object(stream, &object)
+                        .map_err(runtime_error)?;
+                    let acceptance = track_data_acceptance_to_python(acceptance);
+                    objects.push((
+                        stream_id,
+                        object.object_id,
+                        object.payload_length,
+                        acceptance,
+                    ));
+                    let header = self.data_headers.get(&stream_id).copied();
+                    // Subgroup ID を最初の Object ID として決めるモードでは、最初の
+                    // Object を受信した時点で確定する。ヘッダ受信直後は決まらないため
+                    // `None` のままになる
+                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+                    let subgroup_id = header
+                        .and_then(|info| info.subgroup_id)
+                        .or_else(|| decoder.resolved_subgroup_id());
+                    events.push(CoreEvent::object(
+                        Some(stream_id),
+                        ObjectEventParts {
+                            object_id: object.object_id,
+                            payload,
+                            acceptance,
+                            track_alias: header.map(|info| info.track_alias),
+                            group_id: header.map(|info| info.group_id),
+                            status: object.status,
+                            properties: object.properties_bytes.clone(),
+                            publisher_priority: header.and_then(|info| info.publisher_priority),
+                            subgroup_id,
+                        },
+                    ));
+                }
+            }
+            Some(DataStreamDecoder::Fetch(decoder)) => {
+                decoder.push(&buffered);
+                if !self.data_headers_decoded.contains(&stream_id)
+                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
+                {
+                    self.session
+                        .recv_fetch_header(stream, &header)
+                        .map_err(runtime_error)?;
+                    self.data_headers_decoded.insert(stream_id);
+                }
+                // ヘッダが揃うまでエントリはデコードできない
+                if !self.data_headers_decoded.contains(&stream_id) {
+                    events.extend(self.drain_events(py)?);
+                    return Ok((objects, events));
+                }
+                loop {
+                    // ペイロードの到着を待っているエントリを先に処理する。
+                    // デコーダがペイロード消費待ちの間は次のエントリを読めない
+                    let entry = match self.pending_fetch_entries.remove(&stream_id) {
+                        Some(entry) => entry,
+                        None => match decoder.try_decode_entry().map_err(runtime_error)? {
+                            Some(entry) => entry,
+                            None => break,
+                        },
+                    };
+                    // ペイロードが揃っていない場合は保留して続きの到着を待つ。
+                    // payload_length が 0 のオブジェクトはデコーダにペイロードが無い
+                    let payload = match entry {
+                        DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
+                            match decoder.try_read_payload() {
+                                Some(payload) => payload,
+                                None => {
+                                    self.pending_fetch_entries.insert(stream_id, entry);
+                                    break;
+                                }
+                            }
+                        }
+                        _ => Vec::new(),
+                    };
+                    self.session
+                        .recv_fetch_entry(stream)
+                        .map_err(runtime_error)?;
+                    match entry {
+                        DecodedFetchEntry::Object(object) => {
+                            objects.push((
+                                stream_id,
+                                object.object_id,
+                                object.payload_length,
+                                "accepted",
+                            ));
+                            events.push(CoreEvent {
+                                stream_id: Some(stream_id),
+                                object_id: Some(object.object_id),
+                                group_id: Some(object.group_id),
+                                data: Some(payload),
+                                acceptance: Some("accepted"),
+                                // Object Status は FETCH で運ばれるオブジェクトには無い
+                                // (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
+                                status: None,
+                                // FETCH のオブジェクトは Subgroup ID と Publisher Priority を
+                                // エントリ自身が運ぶ
+                                publisher_priority: Some(object.publisher_priority),
+                                subgroup_id: Some(object.subgroup_id),
+                                ..CoreEvent::simple("object")
+                            });
+                        }
+                        // End of Range はオブジェクトを運ばないが、範囲の終端を通知する
+                        DecodedFetchEntry::EndOfNonExistentRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_non_existent_range")
+                            });
+                        }
+                        DecodedFetchEntry::EndOfUnknownRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_unknown_range")
+                            });
+                        }
+                        DecodedFetchEntry::EndOfTimedOutRange {
+                            group_id,
+                            object_id,
+                        } => {
+                            events.push(CoreEvent {
+                                group_id: Some(group_id),
+                                object_id: Some(object_id),
+                                ..CoreEvent::simple("end_of_timed_out_range")
+                            });
+                        }
+                    }
+                }
+            }
+            // padding stream はバイト列を読み捨てる
+            Some(DataStreamDecoder::Padding) | None => {}
+        }
+
+        events.extend(self.drain_events(py)?);
+        Ok((objects, events))
     }
 
     /// 状態機械が発行したイベントをすべて取り出す。
@@ -2206,227 +2556,19 @@ impl CoreSession {
         data: &[u8],
         stream_type: Option<u64>,
     ) -> PyResult<(Vec<DecodedObjectInfo>, Vec<CoreEvent>)> {
-        self.data_buffers.push(stream_id, data)?;
-
         // 最初の断片に含まれる stream type を状態機械へ通知する。
         // stream type の varint は I/O 層が取り除き、種別だけを渡す
         let stream_type = self.notify_data_stream_type(stream_id, stream_type)?;
 
-        // 種別ごとのデコーダを用意する。fetch ストリームは Request ID を運ぶ
-        // FETCH_HEADER が揃うまで作らない
-        if !self.data_decoders.contains_key(&stream_id) {
-            let buffered = self.data_buffers.get(stream_id).to_vec();
-            let Some(decoder) = self.create_data_decoder(stream_type, &buffered)? else {
-                // ヘッダの続きを待つ。断片はバッファへ保持したままにする
-                return Ok((Vec::new(), self.drain_events(py)?));
-            };
-            self.data_decoders.insert(stream_id, decoder);
+        // 購読と無関係なストリームが上限まで届いた場合は、例外ではなく破棄で扱う。
+        // 受信経路の例外は I/O 層まで伝播して接続を失敗させる。デコーダを持たない
+        // ストリームだけがここへ到達しうる (ヘッダが揃わないまま肥大した場合)
+        if !self.data_buffers.fits(stream_id, data) {
+            self.ignore_data_stream(stream_id);
+            return Ok((Vec::new(), self.drain_events(py)?));
         }
-
-        let buffered = self.data_buffers.get(stream_id).to_vec();
-        self.data_buffers.remove(stream_id);
-
-        let mut objects = Vec::new();
-        let mut events = Vec::new();
-        let stream = DataStreamId(stream_id);
-        match self.data_decoders.get_mut(&stream_id) {
-            Some(DataStreamDecoder::Subgroup(decoder)) => {
-                decoder.push(&buffered);
-                if !self.data_headers_decoded.contains(&stream_id)
-                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
-                {
-                    self.session
-                        .recv_subgroup_header(stream, &header)
-                        .map_err(runtime_error)?;
-                    // Subgroup ID を持たないモードではヘッダからは決まらない。Zero は 0、
-                    // FirstObjectId は最初のオブジェクト ID になるため、ここでは `None`
-                    // としてアプリへ渡す
-                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
-                    let subgroup_id = match header.subgroup_id {
-                        SubgroupIdMode::Zero => Some(0),
-                        SubgroupIdMode::Explicit(id) => Some(id),
-                        SubgroupIdMode::FirstObjectId => None,
-                    };
-                    self.data_headers.insert(
-                        stream_id,
-                        DataHeaderInfo {
-                            track_alias: header.track_alias,
-                            group_id: header.group_id,
-                            publisher_priority: header.publisher_priority,
-                            subgroup_id,
-                        },
-                    );
-                    self.data_headers_decoded.insert(stream_id);
-                }
-                // ヘッダが揃うまでオブジェクトはデコードできない
-                if !self.data_headers_decoded.contains(&stream_id) {
-                    events.extend(self.drain_events(py)?);
-                    return Ok((objects, events));
-                }
-                loop {
-                    // ペイロードの到着を待っているオブジェクトを先に処理する。
-                    // デコーダがペイロード消費待ちの間は次のオブジェクトを読めない
-                    let object = match self.pending_subgroup_objects.remove(&stream_id) {
-                        Some(object) => object,
-                        None => match decoder.try_decode_object().map_err(runtime_error)? {
-                            Some(object) => object,
-                            None => break,
-                        },
-                    };
-                    // ペイロードが揃っていない場合は保留して続きの到着を待つ。
-                    // payload_length が 0 のオブジェクトはデコーダにペイロードが無い
-                    let payload = if object.payload_length == 0 {
-                        Vec::new()
-                    } else {
-                        match decoder.try_read_payload() {
-                            Some(payload) => payload,
-                            None => {
-                                self.pending_subgroup_objects.insert(stream_id, object);
-                                break;
-                            }
-                        }
-                    };
-                    let acceptance = self
-                        .session
-                        .recv_subgroup_object(stream, &object)
-                        .map_err(runtime_error)?;
-                    let acceptance = track_data_acceptance_to_python(acceptance);
-                    objects.push((
-                        stream_id,
-                        object.object_id,
-                        object.payload_length,
-                        acceptance,
-                    ));
-                    let header = self.data_headers.get(&stream_id).copied();
-                    // Subgroup ID を最初の Object ID として決めるモードでは、最初の
-                    // Object を受信した時点で確定する。ヘッダ受信直後は決まらないため
-                    // `None` のままになる
-                    // (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
-                    let subgroup_id = header
-                        .and_then(|info| info.subgroup_id)
-                        .or_else(|| decoder.resolved_subgroup_id());
-                    events.push(CoreEvent::object(
-                        Some(stream_id),
-                        ObjectEventParts {
-                            object_id: object.object_id,
-                            payload,
-                            acceptance,
-                            track_alias: header.map(|info| info.track_alias),
-                            group_id: header.map(|info| info.group_id),
-                            status: object.status,
-                            properties: object.properties_bytes.clone(),
-                            publisher_priority: header.and_then(|info| info.publisher_priority),
-                            subgroup_id,
-                        },
-                    ));
-                }
-            }
-            Some(DataStreamDecoder::Fetch(decoder)) => {
-                decoder.push(&buffered);
-                if !self.data_headers_decoded.contains(&stream_id)
-                    && let Some(header) = decoder.try_decode_header().map_err(runtime_error)?
-                {
-                    self.session
-                        .recv_fetch_header(stream, &header)
-                        .map_err(runtime_error)?;
-                    self.data_headers_decoded.insert(stream_id);
-                }
-                // ヘッダが揃うまでエントリはデコードできない
-                if !self.data_headers_decoded.contains(&stream_id) {
-                    events.extend(self.drain_events(py)?);
-                    return Ok((objects, events));
-                }
-                loop {
-                    // ペイロードの到着を待っているエントリを先に処理する。
-                    // デコーダがペイロード消費待ちの間は次のエントリを読めない
-                    let entry = match self.pending_fetch_entries.remove(&stream_id) {
-                        Some(entry) => entry,
-                        None => match decoder.try_decode_entry().map_err(runtime_error)? {
-                            Some(entry) => entry,
-                            None => break,
-                        },
-                    };
-                    // ペイロードが揃っていない場合は保留して続きの到着を待つ。
-                    // payload_length が 0 のオブジェクトはデコーダにペイロードが無い
-                    let payload = match entry {
-                        DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
-                            match decoder.try_read_payload() {
-                                Some(payload) => payload,
-                                None => {
-                                    self.pending_fetch_entries.insert(stream_id, entry);
-                                    break;
-                                }
-                            }
-                        }
-                        _ => Vec::new(),
-                    };
-                    self.session
-                        .recv_fetch_entry(stream)
-                        .map_err(runtime_error)?;
-                    match entry {
-                        DecodedFetchEntry::Object(object) => {
-                            objects.push((
-                                stream_id,
-                                object.object_id,
-                                object.payload_length,
-                                "accepted",
-                            ));
-                            events.push(CoreEvent {
-                                stream_id: Some(stream_id),
-                                object_id: Some(object.object_id),
-                                group_id: Some(object.group_id),
-                                data: Some(payload),
-                                acceptance: Some("accepted"),
-                                // Object Status は FETCH で運ばれるオブジェクトには無い
-                                // (draft-ietf-moq-transport-21 §11.1.2 (Object Status))
-                                status: None,
-                                // FETCH のオブジェクトは Subgroup ID と Publisher Priority を
-                                // エントリ自身が運ぶ
-                                publisher_priority: Some(object.publisher_priority),
-                                subgroup_id: Some(object.subgroup_id),
-                                ..CoreEvent::simple("object")
-                            });
-                        }
-                        // End of Range はオブジェクトを運ばないが、範囲の終端を通知する
-                        DecodedFetchEntry::EndOfNonExistentRange {
-                            group_id,
-                            object_id,
-                        } => {
-                            events.push(CoreEvent {
-                                group_id: Some(group_id),
-                                object_id: Some(object_id),
-                                ..CoreEvent::simple("end_of_non_existent_range")
-                            });
-                        }
-                        DecodedFetchEntry::EndOfUnknownRange {
-                            group_id,
-                            object_id,
-                        } => {
-                            events.push(CoreEvent {
-                                group_id: Some(group_id),
-                                object_id: Some(object_id),
-                                ..CoreEvent::simple("end_of_unknown_range")
-                            });
-                        }
-                        DecodedFetchEntry::EndOfTimedOutRange {
-                            group_id,
-                            object_id,
-                        } => {
-                            events.push(CoreEvent {
-                                group_id: Some(group_id),
-                                object_id: Some(object_id),
-                                ..CoreEvent::simple("end_of_timed_out_range")
-                            });
-                        }
-                    }
-                }
-            }
-            // padding stream はバイト列を読み捨てる
-            Some(DataStreamDecoder::Padding) | None => {}
-        }
-
-        events.extend(self.drain_events(py)?);
-        Ok((objects, events))
+        self.data_buffers.push(stream_id, data)?;
+        self.receive_buffered_data_stream(py, stream_id, stream_type)
     }
 
     /// peer の data stream が終端したことを通知する。
@@ -2449,6 +2591,10 @@ impl CoreSession {
         self.pending_fetch_entries.remove(&stream_id);
         self.data_stream_types.remove(&stream_id);
         self.data_headers_decoded.remove(&stream_id);
+        // 保留や無視の対象だったストリームは終端したため、保持している状態を捨てる。
+        // 終端したストリームを再試行すると状態機械が未知の stream id として失敗する
+        self.pending_data_streams.remove(&stream_id);
+        self.ignored_data_streams.remove(&stream_id);
 
         let end = request_stream_end(reset, error_code, reliable_size)?;
         self.session
@@ -2464,6 +2610,15 @@ impl CoreSession {
             let _ = self.session.report_mid_object_fin(DataStreamId(stream_id));
         }
         self.drain_events(py)
+    }
+
+    /// 購読が確定する前に届いたデータストリームを再試行する。
+    ///
+    /// ヘッダを受理できずに保留したストリームを購読の確定後に回し直し、発生した
+    /// イベントを返す。購読を登録した直後と定期処理から呼ぶ。保留がなければ
+    /// 空のリストを返す。
+    fn retry_pending_data_streams(&mut self, py: Python<'_>) -> PyResult<Vec<CoreEvent>> {
+        retry_held_data_streams(self, py)
     }
 
     /// peer のデータグラムを投入し、発生したイベントを返す。

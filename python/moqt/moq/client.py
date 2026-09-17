@@ -568,6 +568,9 @@ class Client:
         )
         self._subscriptions[request_id] = subscription
         self._subscriptions_by_alias[track_alias] = subscription
+        # SUBSCRIBE_OK の処理より先に届いていたストリームを購読へ渡す。状態機械が
+        # Track Alias を知らない間に届いた subgroup ストリームは保留されている
+        await runtime.retry_pending_data_streams()
         # SUBSCRIBE_OK の処理より先に届いていたオブジェクトを購読へ渡す
         for item in self._pending_objects.pop(track_alias, []):
             subscription._push(item)

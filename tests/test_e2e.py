@@ -926,6 +926,34 @@ async def test_object_published_right_after_subscribe_ok_is_delivered(moq_pair: 
     assert [item.payload for item in received] == [b"immediate", b"immediate-2"]
 
 
+async def test_datagram_published_right_after_subscribe_ok_is_delivered(
+    moq_pair: MoqPair,
+) -> None:
+    """
+    SUBSCRIBE_OK の直後に送ったデータグラムが取りこぼされないことを確認する。
+
+    データグラムも SUBSCRIBE_OK と別の経路で届く。subscriber が SUBSCRIBE_OK を処理して
+    Track Alias を購読へ紐づけるより先に届いたデータグラムも、購読が確定した時点で
+    渡さなければならない。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        # 応答と同じコールバックの中で送る。購読の登録が追いついていない間に
+        # 届く可能性がある最も早いタイミングである
+        publication = await request.subscribe_ok(TRACK_ALIAS)
+        published.append(publication)
+        await publication.send_datagram(1, 0, b"immediate")
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+
+    received = await _take_objects(subscription, 1)
+
+    assert [item.payload for item in received] == [b"immediate"]
+
+
 @pytest.mark.parametrize(
     "payload_size",
     [0, 127, 128, 16383, 16384],
