@@ -1,0 +1,54 @@
+# GitHub Actions による CI
+#
+# - prek ジョブ: prek.toml のフックを pre-commit と pre-push の両ステージで実行する。
+#   pre-push のフック (pytest / cargo test) は既定のステージでは実行されないため、
+#   prek-action をステージごとに 2 回呼び分ける
+# - runner: OS と CPU アーキテクチャの組み合わせ 3 つに同じフックを回し、環境ごとの差
+#   (PyO3 拡張のビルド、QUIC の実通信テスト) を検出する
+#   - ubuntu-slim は Rust が入っておらず、moqt-py は PyO3 拡張のビルドに cargo を
+#     要するため使わない
+#   - macos-15 は入れない。webtransport-py の macOS wheel は macosx_26_0_arm64 だけで
+#     sdist も無く、macOS 15 では互換 wheel が見つからず uv sync が失敗する。
+#     webtransport-py が macOS 15 向けの wheel か sdist を用意したら追加する
+# - Rust ツールチェーン: rust-toolchain.toml が channel と components
+#   (rustfmt / clippy) を宣言しているため、rustup がツールチェーンごと自動で導入する。
+#   CI 側で `rustup component add` を実行する必要はない
+
+name: CI
+
+on:
+  push:
+    branches:
+      - develop
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    strategy:
+      # 1 つの runner の失敗で残りの runner を打ち切らない
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+          - macos-26
+    runs-on: ${{ matrix.runner }}
+    # prek の hook 環境準備 (初回や cache miss)、Python のダウンロード、PyO3 拡張の
+    # ビルドを見込んで余裕を持たせる
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ローカルフックが uv を呼ぶため uv を先に用意する
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      # pre-commit ステージのフック (cargo fmt / cargo clippy / ruff / ty / tombi) を実行する
+      - name: pre-commit ステージのフックを実行する
+        uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+      # pre-push ステージのフック (pytest / cargo test) を実行する
+      - name: pre-push ステージのフックを実行する
+        uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+        with:
+          extra-args: "--all-files --stage pre-push"
