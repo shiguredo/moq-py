@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 # オブジェクトが届き続けている場合だけである。
 MAX_PENDING_OBJECTS_PER_ALIAS = 1024
 
+# 購読が未登録のまま届いた終了通知を保持する上限。
+#
+# 状態機械が SUBSCRIBE_OK を処理してから Client が購読を登録するまでの間だけ
+# 保持すればよいため、通常は数件に収まる。上限に達するのは、Client が開始して
+# いない request の終了通知だけが届き続けている場合である。
+MAX_PENDING_TERMINATIONS = 64
+
 
 @dataclass(frozen=True, slots=True)
 class PeerGoaway:
@@ -302,6 +309,10 @@ class Client:
         self._subscriptions: dict[int, Subscription] = {}
         self._subscriptions_by_alias: dict[int, Subscription] = {}
         self._pending_objects: dict[int, list[MoqtObject]] = {}
+        # 購読が未登録のまま届いた終了通知 (Request ID)。
+        # PUBLISH_DONE と RequestTerminated は購読の登録より先に届くことがあり、
+        # その場合は登録時に終了させる必要があるため保持する
+        self._pending_terminations: dict[int, None] = {}
         self._fetches: dict[int, Fetch] = {}
 
         # アプリが登録するコールバック
@@ -560,6 +571,10 @@ class Client:
         # SUBSCRIBE_OK の処理より先に届いていたオブジェクトを購読へ渡す
         for item in self._pending_objects.pop(track_alias, []):
             subscription._push(item)
+        # 購読の登録より先に届いていた終了通知を反映する。反映しないと
+        # `objects()` が終わらないまま残る
+        if self._take_pending_termination(request_id):
+            subscription._finish()
         return subscription
 
     async def publish(
@@ -806,20 +821,50 @@ class Client:
         if request_id is None:
             return
         subscription = self._subscriptions.pop(request_id, None)
+        fetch = self._fetches.pop(request_id, None)
         if subscription is not None:
             self._subscriptions_by_alias.pop(subscription.track_alias, None)
             self._pending_objects.pop(subscription.track_alias, None)
             subscription._finish()
-        fetch = self._fetches.pop(request_id, None)
-        if fetch is not None:
+        elif fetch is not None:
             fetch._finish()
+        else:
+            # 購読の登録より先に届いた終了通知である可能性があるため保持する
+            self._remember_pending_termination(request_id)
         if self._runtime is not None:
             self._runtime.cleanup_terminated_requests()
 
     async def _on_publish_done(self, event: NativeEvent) -> None:
-        subscription = self._subscriptions.get(event.request_id or -1)
-        if subscription is not None:
-            subscription._finish()
+        """PUBLISH_DONE を受けた購読を終了する。"""
+        request_id = event.request_id
+        if request_id is None:
+            return
+        subscription = self._subscriptions.get(request_id)
+        if subscription is None:
+            # 状態機械が SUBSCRIBE_OK を処理してから Client が購読を登録するまでの間に
+            # PUBLISH_DONE が届いた場合は、登録時に終了させる
+            self._remember_pending_termination(request_id)
+            return
+        subscription._finish()
+
+    def _remember_pending_termination(self, request_id: int) -> None:
+        """購読が未登録のまま届いた終了通知を保持する。
+
+        保持する数には上限を設ける。上限に達するのは、購読が登録されないまま
+        終了通知だけが届き続けている場合だけである。
+        """
+        pending = self._pending_terminations
+        if len(pending) >= MAX_PENDING_TERMINATIONS:
+            # 挿入順で最も古いものを捨てる
+            del pending[next(iter(pending))]
+        pending[request_id] = None
+
+    def _take_pending_termination(self, request_id: int) -> bool:
+        """保持していた終了通知を取り出す。"""
+        if request_id not in self._pending_terminations:
+            return False
+        del self._pending_terminations[request_id]
+        return True
 
     async def _on_publish_state_notify(self, event: NativeEvent) -> None:
         """peer からの PUBLISH_STATE_NOTIFY をアプリへ通知する。"""

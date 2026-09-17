@@ -61,6 +61,11 @@ async def _take_objects(subscription: Subscription, count: int) -> list[MoqtObje
     return await collect_objects(subscription.objects(), count, OBJECT_TIMEOUT)
 
 
+async def _take_objects_until_end(subscription: Subscription) -> list[MoqtObject]:
+    """subscription が終了するまでオブジェクトを取り出す。"""
+    return [item async for item in subscription.objects()]
+
+
 async def _take_objects_in_group(
     subscription: Subscription,
     group_id: int,
@@ -356,6 +361,40 @@ async def test_objects_in_a_second_group_are_delivered(moq_pair: MoqPair) -> Non
         1: [(0, b"first"), (1, b"second")],
         2: [(0, b"third")],
     }
+
+
+async def test_subscription_ends_when_publisher_closes_just_after_subscribe_ok(
+    moq_pair: MoqPair,
+) -> None:
+    """
+    publisher が SUBSCRIBE_OK の直後に PUBLISH_DONE と FIN を送っても購読が終了することを
+    確認する。
+
+    状態機械が SUBSCRIBE_OK を処理してから `Client.subscribe` が購読を登録するまでの間に
+    PUBLISH_DONE と RequestTerminated が届くと、終了通知を購読へ渡せず
+    `Subscription.objects()` が終わらないまま残る。終了通知は購読の登録時に反映しなければ
+    ならない。
+    """
+    published: list[Publication] = []
+
+    async def on_subscribe(request: SubscriptionRequest) -> None:
+        publication = await request.subscribe_ok(TRACK_ALIAS)
+        await publication.send_object(1, 0, b"hello")
+        await publication.close()
+        published.append(publication)
+
+    moq_pair.server.on_subscribe(on_subscribe)
+
+    subscription = await moq_pair.client.subscribe(NAMESPACE, TRACK_NAME)
+    await wait_until(lambda: bool(published))
+
+    # 購読が終了しなければ wait_for が TimeoutError になる
+    received = await asyncio.wait_for(_take_objects_until_end(subscription), timeout=OBJECT_TIMEOUT)
+
+    # オブジェクトはデータストリーム、PUBLISH_DONE は request stream で届くため、
+    # 両者に順序関係は無い。PUBLISH_DONE の後に届いたオブジェクトは状態機械が購読を
+    # 回収した後に到着し、受理されないことがある
+    assert [item.payload for item in received] in ([], [b"hello"])
 
 
 async def test_object_properties_are_delivered(moq_pair: MoqPair) -> None:
